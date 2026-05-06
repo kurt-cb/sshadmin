@@ -18,6 +18,7 @@
                 <thead>
                     <tr>
                         <th>Hostname</th>
+                        <th>Status</th>
                         <th>Description</th>
                         <th>Added By</th>
                         <th>Created</th>
@@ -31,6 +32,13 @@
                             <strong>{{ host.hostname }}</strong>
                         </td>
                         <td>
+                            {% if host.is_enrolled %}
+                                <span class="badge bg-success">Enrolled</span>
+                            {% else %}
+                                <span class="badge bg-warning text-dark">Pending</span>
+                            {% endif %}
+                        </td>
+                        <td>
                             {% if host.description %}
                                 {{ host.description[:50] }}{% if host.description|length > 50 %}...{% endif %}
                             {% else %}
@@ -41,9 +49,15 @@
                         <td>{{ host.created_at.strftime('%Y-%m-%d') }}</td>
                         <td>
                             <div class="btn-group btn-group-sm" role="group">
+                                {% if host.is_enrolled %}
                                 <a href="/certificates/issue/host?host_id={{ host.id }}" class="btn btn-info" title="Issue Certificate">
                                     <i class="bi bi-file-earmark-check"></i>
                                 </a>
+                                {% else %}
+                                <a href="{{ url_for('enroll_host', host_id=host.id) }}" class="btn btn-warning" title="Show Enrollment Script">
+                                    <i class="bi bi-terminal"></i>
+                                </a>
+                                {% endif %}
                                 <form method="POST" action="/hosts/{{ host.id }}/delete" style="display: inline;" onsubmit="return confirm('Delete this host?');">
                                     <button type="submit" class="btn btn-danger" title="Delete">
                                         <i class="bi bi-trash"></i>

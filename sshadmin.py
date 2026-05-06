@@ -8,9 +8,13 @@ from werkzeug.security import generate_password_hash, check_password_hash
 from datetime import datetime, timedelta
 import os
 import json
+import secrets
 from pathlib import Path
 import subprocess
 import tempfile
+
+ALLOWED_HOST_KEY_TYPE = 'ecdsa-sha2-nistp521'
+ENROLLMENT_TOKEN_TTL_HOURS = 24
 
 app = Flask(__name__)
 app.config['SECRET_KEY'] = os.environ.get('SECRET_KEY', 'dev-secret-key-change-in-production')
@@ -45,12 +49,26 @@ class Host(db.Model):
     id = db.Column(db.Integer, primary_key=True)
     hostname = db.Column(db.String(255), unique=True, nullable=False)
     description = db.Column(db.Text)
-    public_key = db.Column(db.Text, nullable=False)
+    public_key = db.Column(db.Text, nullable=True)
     created_at = db.Column(db.DateTime, default=datetime.utcnow)
     created_by_id = db.Column(db.Integer, db.ForeignKey('user.id'), nullable=False)
-    
+
+    enrollment_token = db.Column(db.String(64), unique=True, nullable=True, index=True)
+    enrollment_expires_at = db.Column(db.DateTime, nullable=True)
+    enrolled_at = db.Column(db.DateTime, nullable=True)
+
     creator = db.relationship('User', backref='hosts')
     certificates = db.relationship('Certificate', backref='host', lazy=True, cascade='all, delete-orphan')
+
+    @property
+    def is_enrolled(self):
+        return self.enrolled_at is not None and self.public_key
+
+    def issue_enrollment_token(self):
+        self.enrollment_token = secrets.token_urlsafe(32)
+        self.enrollment_expires_at = datetime.utcnow() + timedelta(hours=ENROLLMENT_TOKEN_TTL_HOURS)
+        self.enrolled_at = None
+        self.public_key = None
 
 
 class SSHUser(db.Model):
@@ -279,33 +297,102 @@ def hosts():
 @app.route('/hosts/add', methods=['GET', 'POST'])
 @login_required
 def add_host():
-    """Add new host"""
+    """Add new host (issues enrollment token; host self-registers via script)"""
     if request.method == 'POST':
-        hostname = request.form.get('hostname')
+        hostname = (request.form.get('hostname') or '').strip()
         description = request.form.get('description')
-        public_key = request.form.get('public_key')
-        
-        if not hostname or not public_key:
-            flash('Hostname and public key are required', 'danger')
+
+        if not hostname:
+            flash('Hostname is required', 'danger')
             return redirect(url_for('add_host'))
-        
+
         if Host.query.filter_by(hostname=hostname).first():
             flash('Host already exists', 'danger')
             return redirect(url_for('add_host'))
-        
+
         host = Host(
             hostname=hostname,
             description=description,
-            public_key=public_key,
-            created_by_id=current_user.id
+            created_by_id=current_user.id,
         )
+        host.issue_enrollment_token()
         db.session.add(host)
         db.session.commit()
-        
-        flash(f'Host {hostname} added successfully', 'success')
-        return redirect(url_for('hosts'))
-    
+
+        return redirect(url_for('enroll_host', host_id=host.id))
+
     return render_template('add_host.html')
+
+
+@app.route('/hosts/<int:host_id>/enroll')
+@login_required
+def enroll_host(host_id):
+    """Show the bash enrollment script for a pending host."""
+    host = Host.query.get_or_404(host_id)
+
+    if host.is_enrolled:
+        flash(f'Host {host.hostname} is already enrolled.', 'info')
+        return redirect(url_for('hosts'))
+
+    if not host.enrollment_token or host.enrollment_expires_at < datetime.utcnow():
+        host.issue_enrollment_token()
+        db.session.commit()
+        flash('Enrollment token expired; a new one was issued.', 'info')
+
+    server_url = request.url_root.rstrip('/')
+    script = render_template(
+        'enrollment_script.sh',
+        server_url=server_url,
+        token=host.enrollment_token,
+        hostname=host.hostname,
+        key_type=ALLOWED_HOST_KEY_TYPE,
+    )
+
+    return render_template(
+        'enroll_host.html',
+        host=host,
+        script=script,
+        expires_at=host.enrollment_expires_at,
+    )
+
+
+@app.route('/hosts/<int:host_id>/enroll/script')
+@login_required
+def enroll_host_script(host_id):
+    """Download the enrollment script as a .sh file."""
+    host = Host.query.get_or_404(host_id)
+    if host.is_enrolled or not host.enrollment_token:
+        flash('No active enrollment for this host.', 'danger')
+        return redirect(url_for('hosts'))
+
+    server_url = request.url_root.rstrip('/')
+    script = render_template(
+        'enrollment_script.sh',
+        server_url=server_url,
+        token=host.enrollment_token,
+        hostname=host.hostname,
+        key_type=ALLOWED_HOST_KEY_TYPE,
+    )
+    from flask import Response
+    return Response(
+        script,
+        mimetype='text/x-shellscript',
+        headers={'Content-Disposition': f'attachment; filename=enroll-{host.hostname}.sh'},
+    )
+
+
+@app.route('/hosts/<int:host_id>/enroll/regenerate', methods=['POST'])
+@login_required
+def regenerate_enrollment(host_id):
+    """Issue a fresh enrollment token for a pending host."""
+    host = Host.query.get_or_404(host_id)
+    if host.is_enrolled:
+        flash('Host is already enrolled; cannot regenerate token.', 'danger')
+        return redirect(url_for('hosts'))
+    host.issue_enrollment_token()
+    db.session.commit()
+    flash('New enrollment token issued.', 'success')
+    return redirect(url_for('enroll_host', host_id=host.id))
 
 
 @app.route('/hosts/<int:host_id>/delete', methods=['POST'])
@@ -441,13 +528,17 @@ def issue_user_cert():
 @login_required
 def issue_host_cert():
     """Issue host certificate"""
-    hosts = Host.query.all()
-    
+    hosts = [h for h in Host.query.all() if h.is_enrolled]
+
     if request.method == 'POST':
         host_id = request.form.get('host_id')
         valid_days = int(request.form.get('valid_days', 365))
-        
+
         host = Host.query.get_or_404(host_id)
+
+        if not host.is_enrolled:
+            flash(f'Host {host.hostname} has not completed enrollment.', 'danger')
+            return redirect(url_for('issue_host_cert'))
         
         try:
             with tempfile.NamedTemporaryFile(mode='w', delete=False, suffix='.pub') as f:
@@ -500,6 +591,51 @@ def api_ca_status():
     """Check CA key status"""
     has_ca = cert_gen.check_ca_keys()
     return jsonify({'ca_available': has_ca})
+
+
+@app.route('/api/ca-pubkey')
+def api_ca_pubkey():
+    """Public CA public key for client trust installation."""
+    if not os.path.exists(cert_gen.ca_pubkey):
+        return ('CA public key not configured', 503, {'Content-Type': 'text/plain'})
+    with open(cert_gen.ca_pubkey, 'r') as f:
+        data = f.read()
+    return (data, 200, {'Content-Type': 'text/plain; charset=utf-8'})
+
+
+@app.route('/api/enroll/host', methods=['POST'])
+def api_enroll_host():
+    """Token-authenticated host self-enrollment. Body: {token, public_key}."""
+    payload = request.get_json(silent=True) or request.form
+    token = (payload.get('token') or '').strip()
+    public_key = (payload.get('public_key') or '').strip()
+
+    if not token or not public_key:
+        return jsonify({'ok': False, 'error': 'token and public_key required'}), 400
+
+    host = Host.query.filter_by(enrollment_token=token).first()
+    if not host:
+        return jsonify({'ok': False, 'error': 'invalid token'}), 403
+
+    if host.enrolled_at is not None:
+        return jsonify({'ok': False, 'error': 'token already used'}), 409
+
+    if host.enrollment_expires_at is None or host.enrollment_expires_at < datetime.utcnow():
+        return jsonify({'ok': False, 'error': 'token expired'}), 403
+
+    if not public_key.startswith(ALLOWED_HOST_KEY_TYPE + ' '):
+        return jsonify({
+            'ok': False,
+            'error': f'host key must be {ALLOWED_HOST_KEY_TYPE}',
+        }), 400
+
+    host.public_key = public_key
+    host.enrolled_at = datetime.utcnow()
+    host.enrollment_token = None
+    host.enrollment_expires_at = None
+    db.session.commit()
+
+    return jsonify({'ok': True, 'hostname': host.hostname})
 
 
 @app.errorhandler(404)

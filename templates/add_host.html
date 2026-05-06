@@ -12,27 +12,20 @@
                 <form method="POST">
                     <div class="mb-3">
                         <label for="hostname" class="form-label">Hostname <span class="text-danger">*</span></label>
-                        <input type="text" class="form-control" id="hostname" name="hostname" 
+                        <input type="text" class="form-control" id="hostname" name="hostname"
                                placeholder="e.g., server1.example.com" required>
                         <small class="form-text text-muted">FQDN or IP address of the host</small>
                     </div>
-                    
-                    <div class="mb-3">
-                        <label for="public_key" class="form-label">SSH Public Key <span class="text-danger">*</span></label>
-                        <textarea class="form-control" id="public_key" name="public_key" rows="6" 
-                                  placeholder="ssh-rsa AAAA... or ssh-ed25519 AAAA..." required></textarea>
-                        <small class="form-text text-muted">Paste the host's public key (ssh_host_*.pub)</small>
-                    </div>
-                    
+
                     <div class="mb-3">
                         <label for="description" class="form-label">Description</label>
-                        <textarea class="form-control" id="description" name="description" rows="3" 
+                        <textarea class="form-control" id="description" name="description" rows="3"
                                   placeholder="Optional: server purpose, location, etc."></textarea>
                     </div>
-                    
+
                     <div class="d-flex gap-2">
                         <button type="submit" class="btn btn-primary">
-                            <i class="bi bi-check-circle"></i> Add Host
+                            <i class="bi bi-check-circle"></i> Generate Enrollment Script
                         </button>
                         <a href="/hosts" class="btn btn-secondary">Cancel</a>
                     </div>
@@ -40,23 +33,24 @@
             </div>
         </div>
     </div>
-    
+
     <div class="col-md-4">
         <div class="card">
             <div class="card-header">
-                <h5 class="mb-0">Tips</h5>
+                <h5 class="mb-0">How enrollment works</h5>
             </div>
             <div class="card-body">
-                <h6>Getting Host Public Key</h6>
-                <p>Run on the target host:</p>
-                <code class="d-block bg-light p-2 rounded mb-3 text-break">cat /etc/ssh/ssh_host_ed25519_key.pub</code>
-                
-                <h6>Valid Key Formats</h6>
-                <ul class="small">
-                    <li>ssh-rsa</li>
-                    <li>ssh-ed25519</li>
-                    <li>ecdsa-sha2-nistp256</li>
-                </ul>
+                <ol class="small ps-3">
+                    <li>Submit this form &mdash; sshadmin issues a one-time enrollment token for the host.</li>
+                    <li>Copy the generated bash script to a root shell on the target host.</li>
+                    <li>The script generates an <code>ecdsa-sha2-nistp521</code> host key
+                        (only this type is accepted), installs the CA public key, and
+                        registers the host's public key with sshadmin via the REST API.</li>
+                    <li>Once enrolled, you can issue host certificates from sshadmin.</li>
+                </ol>
+                <div class="alert alert-info small mb-0">
+                    The token expires after 24 hours and cannot be reused.
+                </div>
             </div>
         </div>
     </div>

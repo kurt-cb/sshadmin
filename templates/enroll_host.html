@@ -1,0 +1,95 @@
+{% extends "base.html" %}
+
+{% block title %}Enroll {{ host.hostname }} - SSH Certificate Admin{% endblock %}
+
+{% block extra_css %}
+<style>
+  pre.enrollment-script {
+    background-color: #1e1e1e;
+    color: #d4d4d4;
+    padding: 1rem;
+    border-radius: 6px;
+    max-height: 60vh;
+    overflow: auto;
+    font-size: 0.85rem;
+    line-height: 1.4;
+  }
+  .copy-btn-wrap {
+    position: relative;
+  }
+  .copy-btn {
+    position: absolute;
+    top: 0.5rem;
+    right: 0.5rem;
+  }
+</style>
+{% endblock %}
+
+{% block content %}
+<h1 class="mb-3">Enroll Host: {{ host.hostname }}</h1>
+
+<div class="alert alert-warning" role="alert">
+  <strong>One-time enrollment.</strong> This script contains a single-use token that
+  expires <span title="{{ expires_at }}">at {{ expires_at.strftime('%Y-%m-%d %H:%M UTC') }}</span>.
+  Run it as <code>root</code> on <strong>{{ host.hostname }}</strong>. Anyone with this
+  token can register the host until enrollment completes — treat it like a password.
+</div>
+
+<div class="card mb-3">
+  <div class="card-header d-flex justify-content-between align-items-center">
+    <span>Copy &amp; paste into a root shell on the target host</span>
+    <a class="btn btn-sm btn-outline-light" href="{{ url_for('enroll_host_script', host_id=host.id) }}">
+      <i class="bi bi-download"></i> Download .sh
+    </a>
+  </div>
+  <div class="card-body copy-btn-wrap p-0">
+    <button class="btn btn-sm btn-secondary copy-btn" type="button" id="copy-script-btn">
+      <i class="bi bi-clipboard"></i> Copy
+    </button>
+    <pre class="enrollment-script m-0" id="enrollment-script">{{ script }}</pre>
+  </div>
+</div>
+
+<div class="d-flex gap-2">
+  <form method="POST" action="{{ url_for('regenerate_enrollment', host_id=host.id) }}"
+        onsubmit="return confirm('Invalidate the current token and issue a new one?');">
+    <button type="submit" class="btn btn-outline-warning">
+      <i class="bi bi-arrow-clockwise"></i> Regenerate Token
+    </button>
+  </form>
+  <a href="{{ url_for('hosts') }}" class="btn btn-secondary">Back to Hosts</a>
+</div>
+
+<div class="card mt-4">
+  <div class="card-header">What this script does</div>
+  <div class="card-body">
+    <ol class="mb-0">
+      <li>Generates a fresh <code>ecdsa-sha2-nistp521</code> host key at
+        <code>/etc/ssh/ssh_host_ecdsa_key</code> if one does not already exist
+        (refuses to overwrite a non-matching existing key).</li>
+      <li>Downloads the sshadmin CA public key to
+        <code>/etc/ssh/sshadmin_ca.pub</code> and writes
+        <code>/etc/ssh/sshd_config.d/99-sshadmin.conf</code> with
+        <code>TrustedUserCAKeys</code> + <code>HostCertificate</code> directives.</li>
+      <li>POSTs the host's public key plus the one-time token to
+        <code>/api/enroll/host</code>; the server validates the key type and
+        marks this host enrolled.</li>
+      <li>Reloads <code>sshd</code> so the new config takes effect.</li>
+    </ol>
+  </div>
+</div>
+{% endblock %}
+
+{% block extra_js %}
+<script>
+  document.getElementById('copy-script-btn').addEventListener('click', function() {
+    var pre = document.getElementById('enrollment-script');
+    navigator.clipboard.writeText(pre.innerText).then(function() {
+      var btn = document.getElementById('copy-script-btn');
+      var orig = btn.innerHTML;
+      btn.innerHTML = '<i class="bi bi-check2"></i> Copied';
+      setTimeout(function() { btn.innerHTML = orig; }, 1500);
+    });
+  });
+</script>
+{% endblock %}
