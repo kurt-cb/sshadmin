@@ -68,9 +68,63 @@
   </div>
 </div>
 
+<div class="card mb-3">
+  <div class="card-header">Owners ({{ host.owners|length }})</div>
+  <div class="card-body">
+    <table class="table table-sm mb-3">
+      <tbody>
+        {% for owner in host.owners %}
+        <tr>
+          <td>
+            {{ owner.username }}
+            {% if owner.is_admin %}<span class="badge bg-secondary">admin</span>{% endif %}
+            {% if owner.id == host.created_by_id %}<span class="badge bg-info">creator</span>{% endif %}
+          </td>
+          <td class="text-end">
+            {% if can_admin and (current_user.is_admin or owner.id == current_user.id) %}
+            <form method="POST" action="{{ url_for('unshare_host', host_id=host.id, user_id=owner.id) }}"
+                  class="d-inline"
+                  onsubmit="return confirm('Remove {{ owner.username }} as an owner? If this is the last owner, the host itself will be deleted.');">
+              <button type="submit" class="btn btn-sm btn-outline-danger">
+                {% if owner.id == current_user.id %}Leave{% else %}Remove{% endif %}
+              </button>
+            </form>
+            {% endif %}
+          </td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+
+    {% if can_admin and share_candidates %}
+    <form method="POST" action="{{ url_for('share_host', host_id=host.id) }}" class="row g-2 align-items-center">
+      <div class="col-auto">
+        <label for="user_id" class="col-form-label">Add owner:</label>
+      </div>
+      <div class="col-auto">
+        <select class="form-select form-select-sm" name="user_id" id="user_id">
+          <option value="">— pick a user —</option>
+          {% for u in share_candidates %}
+          <option value="{{ u.id }}">{{ u.username }}</option>
+          {% endfor %}
+        </select>
+      </div>
+      <div class="col-auto">
+        <button type="submit" class="btn btn-sm btn-outline-primary">
+          <i class="bi bi-person-plus"></i> Share
+        </button>
+      </div>
+    </form>
+    {% elif can_admin %}
+    <p class="text-muted small mb-0">No other registered users to share with yet.</p>
+    {% endif %}
+  </div>
+</div>
+
 <div class="card">
   <div class="card-header">Manage Registration</div>
   <div class="card-body d-flex flex-wrap gap-2">
+    {% if can_admin %}
     <a href="{{ url_for('issue_host_cert') }}?host_id={{ host.id }}" class="btn btn-primary">
       <i class="bi bi-file-earmark-check"></i> Issue Certificate
     </a>
@@ -83,11 +137,12 @@
     </form>
 
     <form method="POST" action="{{ url_for('delete_host', host_id=host.id) }}"
-          onsubmit="return confirm('Delete this host and all its certificates?');">
+          onsubmit="return confirm({% if current_user.is_admin %}'Admin delete: this wipes the host and all its certificates regardless of co-owners. Continue?'{% else %}'Remove yourself as an owner? If you are the last owner, the host itself will be deleted.'{% endif %});">
       <button type="submit" class="btn btn-danger">
-        <i class="bi bi-trash"></i> Delete Registration
+        {% if current_user.is_admin %}<i class="bi bi-trash"></i> Delete Host (admin){% else %}<i class="bi bi-box-arrow-right"></i> Leave / Delete{% endif %}
       </button>
     </form>
+    {% endif %}
 
     <a href="{{ url_for('hosts') }}" class="btn btn-secondary ms-auto">Back to Hosts</a>
   </div>

@@ -1,0 +1,66 @@
+{% extends "base.html" %}
+
+{% block title %}Profile - SSH Certificate Admin{% endblock %}
+
+{% block content %}
+<h1 class="mb-3">Profile: {{ user.username }}{% if user.is_admin %} <span class="badge bg-secondary align-middle">admin</span>{% endif %}</h1>
+
+<div class="row">
+  <div class="col-md-7">
+    <div class="card mb-3">
+      <div class="card-header">Account</div>
+      <div class="card-body">
+        <dl class="row mb-0">
+          <dt class="col-sm-4">Username</dt>
+          <dd class="col-sm-8">{{ user.username }}</dd>
+
+          <dt class="col-sm-4">Registered</dt>
+          <dd class="col-sm-8">{{ user.created_at.strftime('%Y-%m-%d %H:%M UTC') }}</dd>
+
+          <dt class="col-sm-4">Completed</dt>
+          <dd class="col-sm-8">
+            {% if user.completed_at %}
+              {{ user.completed_at.strftime('%Y-%m-%d %H:%M UTC') }}
+            {% else %}
+              <span class="text-muted">pending</span>
+            {% endif %}
+          </dd>
+
+          <dt class="col-sm-4">Public Key</dt>
+          <dd class="col-sm-8">
+            <pre class="bg-light p-2 rounded text-break" style="white-space: pre-wrap;">{{ user.public_key }}</pre>
+          </dd>
+        </dl>
+      </div>
+    </div>
+  </div>
+
+  <div class="col-md-5">
+    <div class="card mb-3">
+      <div class="card-header">TOTP (alternate login)</div>
+      <div class="card-body">
+        {% if user.totp_enabled %}
+          <p>
+            <span class="badge bg-success">Enabled</span>
+            You can log in with either your SSH key or a 6-digit code.
+          </p>
+          <form method="POST" action="{{ url_for('disable_totp') }}"
+                onsubmit="return confirm('Disable TOTP? You can still log in via SSH key challenge.');">
+            <button type="submit" class="btn btn-outline-danger btn-sm">
+              <i class="bi bi-x-circle"></i> Disable TOTP
+            </button>
+          </form>
+        {% else %}
+          <p>
+            <span class="badge bg-secondary">Not enabled</span>
+            Without TOTP, your only login method is the SSH key challenge.
+          </p>
+          <a href="{{ url_for('setup_totp') }}" class="btn btn-primary btn-sm">
+            <i class="bi bi-shield-plus"></i> Set Up TOTP
+          </a>
+        {% endif %}
+      </div>
+    </div>
+  </div>
+</div>
+{% endblock %}

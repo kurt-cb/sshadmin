@@ -37,7 +37,7 @@
 </div>
 
 <div class="card mb-3">
-  <div class="card-header">One-liner</div>
+  <div class="card-header">{% if totp_available %}Option 1: SSH key challenge{% else %}One-liner{% endif %}</div>
   <div class="card-body copy-wrap">
     <button class="btn btn-sm btn-secondary copy-btn" id="copy-oneliner" type="button">
       <i class="bi bi-clipboard"></i> Copy
@@ -45,6 +45,34 @@
     <pre class="cmd m-0" id="oneliner">{{ one_liner }}</pre>
   </div>
 </div>
+
+{% if totp_available %}
+<div class="card mb-3">
+  <div class="card-header">Option 2: TOTP code</div>
+  <div class="card-body">
+    <p class="text-muted small mb-2">
+      Enter the 6-digit code from your authenticator app. Either method works
+      &mdash; whichever you submit first verifies you.
+    </p>
+    <form id="totp-form" class="row g-2 align-items-center">
+      <div class="col-auto">
+        <input type="text" inputmode="numeric" autocomplete="one-time-code"
+               class="form-control" id="totp-code" name="code"
+               pattern="[0-9]{6}" maxlength="6"
+               placeholder="123456" required>
+      </div>
+      <div class="col-auto">
+        <button type="submit" class="btn btn-primary">
+          <i class="bi bi-check-circle"></i> Submit code
+        </button>
+      </div>
+      <div class="col-12">
+        <small class="text-danger" id="totp-error"></small>
+      </div>
+    </form>
+  </div>
+</div>
+{% endif %}
 
 <div class="card mb-3">
   <div class="card-header">Status</div>
@@ -79,6 +107,36 @@
     var detailEl = document.getElementById('status-detail');
     var hostEl   = document.getElementById('host-status');
     var token    = {{ challenge.token|tojson }};
+
+    {% if totp_available %}
+    var totpForm = document.getElementById('totp-form');
+    if (totpForm) {
+      totpForm.addEventListener('submit', function(e) {
+        e.preventDefault();
+        var code = document.getElementById('totp-code').value;
+        var err = document.getElementById('totp-error');
+        err.textContent = '';
+        fetch('/api/totp_response', {
+          method: 'POST',
+          credentials: 'same-origin',
+          body: new URLSearchParams({ token: token, code: code }),
+        }).then(function(r) {
+          return r.json().then(function(data) {
+            return { status: r.status, data: data };
+          });
+        }).then(function(res) {
+          if (res.data.ok) {
+            err.textContent = '';
+            poll();
+          } else {
+            err.textContent = res.data.error || 'TOTP submission failed.';
+          }
+        }).catch(function() {
+          err.textContent = 'Network error submitting code.';
+        });
+      });
+    }
+    {% endif %}
 
     function setStatus(cls, html) {
       statusEl.className = cls;

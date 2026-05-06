@@ -5,6 +5,7 @@ from flask import Flask, render_template, request, jsonify, redirect, url_for, f
 from flask_sqlalchemy import SQLAlchemy
 from flask_login import LoginManager, UserMixin, login_user, logout_user, login_required, current_user
 from datetime import datetime, timedelta
+import io
 import os
 import json
 import secrets
@@ -12,11 +13,16 @@ from pathlib import Path
 import subprocess
 import tempfile
 
+import pyotp
+import qrcode
+import qrcode.image.svg
+
 ALLOWED_HOST_KEY_TYPE = 'ecdsa-sha2-nistp521'
 ALLOWED_USER_KEY_TYPES = ('ecdsa-sha2-nistp521', 'ssh-ed25519', 'ecdsa-sha2-nistp384')
 ENROLLMENT_TOKEN_TTL_HOURS = 24
 CHALLENGE_TTL_MINUTES = 30
 SSHSIG_NAMESPACE = 'sshadmin'
+TOTP_ISSUER = 'sshadmin'
 
 app = Flask(__name__)
 app.config['SECRET_KEY'] = os.environ.get('SECRET_KEY', 'dev-secret-key-change-in-production')
@@ -30,6 +36,14 @@ login_manager.login_view = 'login'
 
 # ==================== Database Models ====================
 
+host_owners = db.Table(
+    'host_owners',
+    db.Column('host_id', db.Integer, db.ForeignKey('host.id', ondelete='CASCADE'), primary_key=True),
+    db.Column('user_id', db.Integer, db.ForeignKey('user.id', ondelete='CASCADE'), primary_key=True),
+    db.Column('added_at', db.DateTime, default=datetime.utcnow),
+)
+
+
 class User(UserMixin, db.Model):
     """Application user model — auth via SSH-key challenge/response (no password)."""
     id = db.Column(db.Integer, primary_key=True)
@@ -38,6 +52,12 @@ class User(UserMixin, db.Model):
     is_admin = db.Column(db.Boolean, default=False)
     created_at = db.Column(db.DateTime, default=datetime.utcnow)
     completed_at = db.Column(db.DateTime, nullable=True)
+
+    # Optional TOTP as an alternate login method.
+    totp_secret = db.Column(db.String(64), nullable=True)
+    totp_enabled = db.Column(db.Boolean, default=False, nullable=False)
+
+    owned_hosts = db.relationship('Host', secondary=host_owners, back_populates='owners')
 
     @property
     def is_active(self):
@@ -76,8 +96,9 @@ class Host(db.Model):
     enrollment_expires_at = db.Column(db.DateTime, nullable=True)
     enrolled_at = db.Column(db.DateTime, nullable=True)
 
-    creator = db.relationship('User', backref='hosts')
+    creator = db.relationship('User', backref='hosts', foreign_keys=[created_by_id])
     certificates = db.relationship('Certificate', backref='host', lazy=True, cascade='all, delete-orphan')
+    owners = db.relationship('User', secondary=host_owners, back_populates='owned_hosts')
 
     @property
     def is_enrolled(self):
@@ -318,10 +339,11 @@ cert_gen = SSHCertificateGenerator()
 
 # Endpoints that must remain reachable even when CA is missing.
 _CA_SETUP_ALLOWED_ENDPOINTS = {
-    'login', 'logout', 'register', 'setup_ca', 'static',
+    'login', 'logout', 'register', 'setup_ca', 'setup_totp', 'static',
     'auth_await',
     'api_ca_status', 'api_ca_pubkey',
     'api_auth_script', 'api_auth_status', 'api_challenge_response',
+    'api_totp_response',
     'api_enroll_script', 'api_enroll_host',
 }
 
@@ -389,6 +411,88 @@ def setup_ca():
         return redirect(url_for('server_config'))
 
     return render_template('setup_ca.html', ca_key_path=cert_gen.ca_key)
+
+
+def _generate_totp_qr_svg(uri):
+    """Render a TOTP otpauth:// URI as an inline SVG (no PIL dependency)."""
+    img = qrcode.make(uri, image_factory=qrcode.image.svg.SvgPathImage)
+    buf = io.BytesIO()
+    img.save(buf)
+    return buf.getvalue().decode()
+
+
+@app.route('/setup/totp', methods=['GET', 'POST'])
+@login_required
+def setup_totp():
+    """Optional TOTP setup. User can scan QR + verify, or skip."""
+    if request.method == 'POST':
+        action = (request.form.get('action') or 'verify').strip()
+
+        if action == 'skip':
+            session.pop('pending_totp_secret', None)
+            flash('TOTP setup skipped — challenge/response is the only login method.', 'info')
+            return redirect(url_for('dashboard'))
+
+        secret = session.get('pending_totp_secret')
+        code = (request.form.get('code') or '').strip()
+
+        if not secret:
+            flash('TOTP secret expired. Restarting setup.', 'warning')
+            return redirect(url_for('setup_totp'))
+        if not code:
+            flash('Enter the 6-digit code from your authenticator app.', 'danger')
+            return redirect(url_for('setup_totp'))
+
+        totp = pyotp.TOTP(secret)
+        if not totp.verify(code, valid_window=1):
+            flash('Code did not match. Try again with a fresh code.', 'danger')
+            return redirect(url_for('setup_totp'))
+
+        current_user.totp_secret = secret
+        current_user.totp_enabled = True
+        db.session.commit()
+        session.pop('pending_totp_secret', None)
+        flash('TOTP enabled. You can now log in with either your SSH key or a TOTP code.', 'success')
+        return redirect(url_for('dashboard'))
+
+    if current_user.totp_enabled:
+        flash('TOTP is already enabled. Disable it first to re-enroll.', 'info')
+        return redirect(url_for('profile'))
+
+    secret = session.get('pending_totp_secret')
+    if not secret:
+        secret = pyotp.random_base32()
+        session['pending_totp_secret'] = secret
+
+    uri = pyotp.totp.TOTP(secret).provisioning_uri(
+        name=current_user.username,
+        issuer_name=TOTP_ISSUER,
+    )
+    qr_svg = _generate_totp_qr_svg(uri)
+
+    return render_template(
+        'setup_totp.html',
+        secret=secret,
+        qr_svg=qr_svg,
+        otpauth_uri=uri,
+        issuer=TOTP_ISSUER,
+    )
+
+
+@app.route('/profile')
+@login_required
+def profile():
+    return render_template('profile.html', user=current_user)
+
+
+@app.route('/profile/totp/disable', methods=['POST'])
+@login_required
+def disable_totp():
+    current_user.totp_secret = None
+    current_user.totp_enabled = False
+    db.session.commit()
+    flash('TOTP disabled.', 'info')
+    return redirect(url_for('profile'))
 
 
 @app.route('/server-config')
@@ -499,6 +603,8 @@ def auth_await(token):
     else:
         one_liner = f'curl -fsSL "{one_liner_url}" | bash'
 
+    totp_available = challenge.purpose == 'login' and challenge.user.totp_enabled
+
     return render_template(
         'auth_await.html',
         challenge=challenge,
@@ -506,6 +612,7 @@ def auth_await(token):
         one_liner_url=one_liner_url,
         purpose=challenge.purpose,
         username=challenge.user.username,
+        totp_available=totp_available,
     )
 
 
@@ -538,9 +645,13 @@ def dashboard():
 @app.route('/hosts')
 @login_required
 def hosts():
-    """Manage hosts"""
-    hosts = Host.query.all()
-    return render_template('hosts.html', hosts=hosts)
+    """Manage hosts. Non-admins see only hosts they own."""
+    if current_user.is_admin:
+        host_list = Host.query.order_by(Host.hostname).all()
+    else:
+        host_list = list(current_user.owned_hosts)
+        host_list.sort(key=lambda h: h.hostname)
+    return render_template('hosts.html', hosts=host_list, viewing_as_admin=current_user.is_admin)
 
 
 @app.route('/hosts/add', methods=['GET', 'POST'])
@@ -564,6 +675,8 @@ def add_host():
             if description:
                 existing.description = description
             existing.issue_enrollment_token()
+            if current_user not in existing.owners:
+                existing.owners.append(current_user)
             db.session.commit()
             flash(f'Host {hostname} already had a pending enrollment; a new token was issued.', 'info')
             return redirect(url_for('enroll_host', host_id=existing.id))
@@ -574,6 +687,7 @@ def add_host():
             created_by_id=current_user.id,
         )
         host.issue_enrollment_token()
+        host.owners.append(current_user)
         db.session.add(host)
         db.session.commit()
 
@@ -582,11 +696,22 @@ def add_host():
     return render_template('add_host.html')
 
 
+def _can_view_host(host):
+    return current_user.is_admin or current_user in host.owners
+
+
+def _can_admin_host(host):
+    return current_user.is_admin or current_user in host.owners
+
+
 @app.route('/hosts/<int:host_id>')
 @login_required
 def host_info(host_id):
     """Show registration details for an enrolled host."""
     host = Host.query.get_or_404(host_id)
+    if not _can_view_host(host):
+        flash('You do not have access to this host.', 'danger')
+        return redirect(url_for('hosts'))
     if not host.is_enrolled:
         return redirect(url_for('enroll_host', host_id=host.id))
 
@@ -612,12 +737,22 @@ def host_info(host_id):
             fingerprint = None
 
     active_certs = [c for c in host.certificates if c.valid_until > datetime.utcnow()]
+    owner_ids = {o.id for o in host.owners}
+    candidates = (
+        User.query
+        .filter(User.completed_at.isnot(None))
+        .filter(~User.id.in_(owner_ids) if owner_ids else True)
+        .order_by(User.username)
+        .all()
+    )
     return render_template(
         'host_info.html',
         host=host,
         fingerprint=fingerprint,
         key_type=key_type,
         active_certs=active_certs,
+        share_candidates=candidates,
+        can_admin=_can_admin_host(host),
     )
 
 
@@ -626,10 +761,70 @@ def host_info(host_id):
 def re_register_host(host_id):
     """Invalidate an enrolled host's registration and issue a fresh enrollment token."""
     host = Host.query.get_or_404(host_id)
+    if not _can_admin_host(host):
+        flash('Only an owner or admin can re-register this host.', 'danger')
+        return redirect(url_for('hosts'))
     host.issue_enrollment_token()
     db.session.commit()
     flash(f'Host {host.hostname} registration cleared. Run the new script on the host to re-enroll.', 'warning')
     return redirect(url_for('enroll_host', host_id=host.id))
+
+
+@app.route('/hosts/<int:host_id>/share', methods=['POST'])
+@login_required
+def share_host(host_id):
+    """Add another registered user as a co-owner of this host."""
+    host = Host.query.get_or_404(host_id)
+    if not _can_admin_host(host):
+        flash('Only an owner or admin can share this host.', 'danger')
+        return redirect(url_for('hosts'))
+
+    target_user_id = request.form.get('user_id', type=int)
+    if not target_user_id:
+        flash('Pick a user to add as an owner.', 'danger')
+        return redirect(url_for('host_info', host_id=host.id))
+
+    target = db.session.get(User, target_user_id)
+    if not target or target.completed_at is None:
+        flash('Target user not found or has not completed registration.', 'danger')
+        return redirect(url_for('host_info', host_id=host.id))
+
+    if target in host.owners:
+        flash(f'{target.username} is already an owner.', 'info')
+    else:
+        host.owners.append(target)
+        db.session.commit()
+        flash(f'{target.username} added as co-owner of {host.hostname}.', 'success')
+    return redirect(url_for('host_info', host_id=host.id))
+
+
+@app.route('/hosts/<int:host_id>/unshare/<int:user_id>', methods=['POST'])
+@login_required
+def unshare_host(host_id, user_id):
+    """Remove a co-owner. Admin can remove anyone; an owner can only remove themselves."""
+    host = Host.query.get_or_404(host_id)
+    target = User.query.get_or_404(user_id)
+
+    if not (current_user.is_admin or current_user.id == target.id):
+        flash('You may only remove yourself as an owner; ask an admin for other changes.', 'danger')
+        return redirect(url_for('host_info', host_id=host.id))
+
+    if target not in host.owners:
+        flash(f'{target.username} is not an owner of this host.', 'info')
+        return redirect(url_for('host_info', host_id=host.id))
+
+    host.owners.remove(target)
+    if not host.owners:
+        hostname = host.hostname
+        db.session.delete(host)
+        db.session.commit()
+        flash(f'{hostname} had no remaining owners and was deleted.', 'info')
+        return redirect(url_for('hosts'))
+    db.session.commit()
+    flash(f'{target.username} removed from {host.hostname} owners.', 'info')
+    if target.id == current_user.id:
+        return redirect(url_for('hosts'))
+    return redirect(url_for('host_info', host_id=host.id))
 
 
 @app.route('/hosts/<int:host_id>/enroll')
@@ -712,22 +907,52 @@ def regenerate_enrollment(host_id):
 @app.route('/hosts/<int:host_id>/delete', methods=['POST'])
 @login_required
 def delete_host(host_id):
-    """Delete host"""
+    """Delete host.
+
+    - Admin: wipes the host (and certs) outright.
+    - Non-admin owner: removes only their ownership row; the host itself is
+      deleted only when the last remaining owner removes themselves.
+    """
     host = Host.query.get_or_404(host_id)
     hostname = host.hostname
-    db.session.delete(host)
-    db.session.commit()
-    
-    flash(f'Host {hostname} deleted', 'info')
+
+    if current_user.is_admin:
+        db.session.delete(host)
+        db.session.commit()
+        flash(f'Host {hostname} deleted (admin wipe).', 'info')
+        return redirect(url_for('hosts'))
+
+    if current_user not in host.owners:
+        flash('You are not an owner of this host.', 'danger')
+        return redirect(url_for('hosts'))
+
+    host.owners.remove(current_user)
+    if not host.owners:
+        db.session.delete(host)
+        db.session.commit()
+        flash(f'{hostname} had no other owners; it was removed entirely.', 'info')
+    else:
+        db.session.commit()
+        flash(
+            f'You no longer own {hostname}. {len(host.owners)} other owner(s) still have access.',
+            'info',
+        )
     return redirect(url_for('hosts'))
 
 
 @app.route('/users')
 @login_required
 def users():
-    """Manage SSH users"""
-    ssh_users = SSHUser.query.all()
-    return render_template('users.html', users=ssh_users)
+    """Manage SSH users. Non-admins see only ones they created."""
+    if current_user.is_admin:
+        ssh_users = SSHUser.query.order_by(SSHUser.username).all()
+    else:
+        ssh_users = (
+            SSHUser.query.filter_by(created_by_id=current_user.id)
+            .order_by(SSHUser.username)
+            .all()
+        )
+    return render_template('users.html', users=ssh_users, viewing_as_admin=current_user.is_admin)
 
 
 @app.route('/users/add', methods=['GET', 'POST'])
@@ -766,12 +991,14 @@ def add_user():
 @app.route('/users/<int:user_id>/delete', methods=['POST'])
 @login_required
 def delete_user(user_id):
-    """Delete SSH user"""
+    """Delete SSH user — only the creator or an admin may delete."""
     user = SSHUser.query.get_or_404(user_id)
+    if not (current_user.is_admin or user.created_by_id == current_user.id):
+        flash('You can only delete SSH users you created.', 'danger')
+        return redirect(url_for('users'))
     username = user.username
     db.session.delete(user)
     db.session.commit()
-    
     flash(f'SSH user {username} deleted', 'info')
     return redirect(url_for('users'))
 
@@ -779,16 +1006,26 @@ def delete_user(user_id):
 @app.route('/certificates')
 @login_required
 def certificates():
-    """View all certificates"""
-    certs = Certificate.query.order_by(Certificate.created_at.desc()).all()
-    return render_template('certificates.html', certificates=certs)
+    """View certificates. Non-admins see only ones they created."""
+    q = Certificate.query.order_by(Certificate.created_at.desc())
+    if not current_user.is_admin:
+        q = q.filter_by(created_by_id=current_user.id)
+    return render_template('certificates.html', certificates=q.all(),
+                           viewing_as_admin=current_user.is_admin)
 
 
 @app.route('/certificates/issue/user', methods=['GET', 'POST'])
 @login_required
 def issue_user_cert():
-    """Issue user certificate"""
-    ssh_users = SSHUser.query.all()
+    """Issue user certificate. Non-admins can only issue for SSHUsers they created."""
+    if current_user.is_admin:
+        ssh_users = SSHUser.query.order_by(SSHUser.username).all()
+    else:
+        ssh_users = (
+            SSHUser.query.filter_by(created_by_id=current_user.id)
+            .order_by(SSHUser.username)
+            .all()
+        )
     
     if request.method == 'POST':
         user_id = request.form.get('user_id')
@@ -841,8 +1078,11 @@ def issue_user_cert():
 @app.route('/certificates/issue/host', methods=['GET', 'POST'])
 @login_required
 def issue_host_cert():
-    """Issue host certificate"""
-    hosts = [h for h in Host.query.all() if h.is_enrolled]
+    """Issue host certificate. Non-admins limited to hosts they own."""
+    if current_user.is_admin:
+        hosts = [h for h in Host.query.all() if h.is_enrolled]
+    else:
+        hosts = [h for h in current_user.owned_hosts if h.is_enrolled]
 
     if request.method == 'POST':
         host_id = request.form.get('host_id')
@@ -852,6 +1092,10 @@ def issue_host_cert():
 
         if not host.is_enrolled:
             flash(f'Host {host.hostname} has not completed enrollment.', 'danger')
+            return redirect(url_for('issue_host_cert'))
+
+        if not _can_admin_host(host):
+            flash('You can only issue certificates for hosts you own.', 'danger')
             return redirect(url_for('issue_host_cert'))
         
         try:
@@ -977,6 +1221,22 @@ def api_challenge_response():
                 challenge.user.is_admin = True
             challenge.user.completed_at = datetime.utcnow()
 
+            # Auto-create an SSHUser identity from the registration data so the
+            # new login user can immediately be issued certificates without a
+            # separate /users/add step. Skip silently if a matching identity
+            # already exists (UniqueConstraint on username+public_key).
+            already = SSHUser.query.filter_by(
+                username=challenge.user.username,
+                public_key=challenge.user.public_key,
+            ).first()
+            if already is None:
+                db.session.add(SSHUser(
+                    username=challenge.user.username,
+                    public_key=challenge.user.public_key,
+                    description='Auto-created at registration',
+                    created_by_id=challenge.user.id,
+                ))
+
     host_result = {'enrolled': False}
     if hostname and host_pubkey:
         host_result = _try_enroll_host_during_register(
@@ -995,19 +1255,42 @@ def api_challenge_response():
     })
 
 
+def _pubkey_match(a, b):
+    """Compare just the algorithm + base64 parts (ignore comments) of two SSH pubkeys."""
+    pa = (a or '').split()
+    pb = (b or '').split()
+    return len(pa) >= 2 and len(pb) >= 2 and pa[0] == pb[0] and pa[1] == pb[1]
+
+
 def _try_enroll_host_during_register(user, hostname, host_pubkey):
-    """Best-effort host enrollment as part of registration. Returns a status dict."""
+    """Best-effort host enrollment as part of registration.
+
+    - Same hostname + same pubkey → add `user` as co-owner (implicit share).
+    - Same hostname + different pubkey → refuse (409-equivalent: enrolled=False).
+    - Pending host → promote to enrolled and add `user` as owner.
+    - New hostname → create + add `user` as owner.
+    """
     if not host_pubkey.startswith(ALLOWED_HOST_KEY_TYPE + ' '):
         return {'enrolled': False, 'reason': f'host key must be {ALLOWED_HOST_KEY_TYPE}'}
 
     existing = Host.query.filter_by(hostname=hostname).first()
     if existing is not None:
         if existing.is_enrolled:
-            return {'enrolled': False, 'reason': 'hostname already enrolled'}
+            if _pubkey_match(existing.public_key, host_pubkey):
+                if user not in existing.owners:
+                    existing.owners.append(user)
+                    return {'enrolled': True, 'hostname': hostname, 'shared': True}
+                return {'enrolled': True, 'hostname': hostname, 'already_owner': True}
+            return {
+                'enrolled': False,
+                'reason': 'hostname already enrolled with a different public key',
+            }
         existing.public_key = host_pubkey
         existing.enrolled_at = datetime.utcnow()
         existing.enrollment_token = None
         existing.enrollment_expires_at = None
+        if user not in existing.owners:
+            existing.owners.append(user)
         return {'enrolled': True, 'hostname': hostname, 'reused_pending': True}
 
     host = Host(
@@ -1016,8 +1299,43 @@ def _try_enroll_host_during_register(user, hostname, host_pubkey):
         enrolled_at=datetime.utcnow(),
         created_by_id=user.id,
     )
+    host.owners.append(user)
     db.session.add(host)
     return {'enrolled': True, 'hostname': hostname, 'reused_pending': False}
+
+
+@app.route('/api/totp_response', methods=['POST'])
+def api_totp_response():
+    """Alternate path for login challenges: validate a TOTP code instead of a signature."""
+    payload = request.get_json(silent=True) or request.form
+    token = (payload.get('token') or '').strip()
+    code = (payload.get('code') or '').strip()
+
+    if not token or not code:
+        return jsonify({'ok': False, 'error': 'token and code required'}), 400
+
+    challenge = Challenge.query.filter_by(token=token).first()
+    if not challenge:
+        return jsonify({'ok': False, 'error': 'invalid token'}), 404
+    if challenge.consumed_at is not None:
+        return jsonify({'ok': False, 'error': 'challenge already used'}), 409
+    if challenge.expires_at < datetime.utcnow():
+        return jsonify({'ok': False, 'error': 'challenge expired'}), 410
+    if challenge.purpose != 'login':
+        # TOTP cannot be used to register — TOTP isn't enrolled until *after* registration.
+        return jsonify({'ok': False, 'error': 'TOTP can only be used for login'}), 403
+
+    user = challenge.user
+    if not user.totp_enabled or not user.totp_secret:
+        return jsonify({'ok': False, 'error': 'TOTP is not enabled for this user'}), 403
+
+    totp = pyotp.TOTP(user.totp_secret)
+    if not totp.verify(code, valid_window=1):
+        return jsonify({'ok': False, 'error': 'invalid code'}), 403
+
+    challenge.consumed_at = datetime.utcnow()
+    db.session.commit()
+    return jsonify({'ok': True, 'username': user.username})
 
 
 @app.route('/api/auth_status/<token>')
@@ -1043,9 +1361,16 @@ def api_auth_status(token):
 
     login_user(user)
     session.pop('pending_challenge_token', None)
+
+    # Brand-new registration → offer TOTP setup. Existing users go to dashboard.
+    if challenge.purpose == 'register' and not user.totp_enabled:
+        redirect_target = url_for('setup_totp')
+    else:
+        redirect_target = url_for('dashboard')
+
     return jsonify({
         'status': 'completed',
-        'redirect': url_for('dashboard'),
+        'redirect': redirect_target,
         'is_admin': bool(user.is_admin),
     })
 

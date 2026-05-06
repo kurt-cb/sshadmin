@@ -1,0 +1,67 @@
+{% extends "base.html" %}
+
+{% block title %}Set Up TOTP - SSH Certificate Admin{% endblock %}
+
+{% block extra_css %}
+<style>
+  .qr-wrap svg { max-width: 240px; height: 240px; background: white; padding: 8px; border-radius: 6px; }
+  .secret-text { font-family: monospace; letter-spacing: 0.5px; user-select: all; }
+</style>
+{% endblock %}
+
+{% block content %}
+<h1 class="mb-3">Set Up TOTP <small class="text-muted">optional</small></h1>
+
+<div class="alert alert-info">
+  TOTP is an <strong>alternate</strong> login method, not a second factor. After
+  setup, you can log in with <em>either</em> your SSH private key (signing the
+  challenge) or a 6-digit TOTP code &mdash; both never required at the same time.
+  You can skip and add it later from your profile.
+</div>
+
+<div class="row">
+  <div class="col-md-5 text-center qr-wrap">
+    <p class="text-muted small">Scan with Google Authenticator, Authy, 1Password, etc.</p>
+    {{ qr_svg|safe }}
+    <p class="small text-muted mt-2">
+      Or enter manually:<br>
+      <span class="secret-text">{{ secret }}</span><br>
+      <small>(Issuer: {{ issuer }})</small>
+    </p>
+  </div>
+
+  <div class="col-md-7">
+    <div class="card">
+      <div class="card-header">Verify</div>
+      <div class="card-body">
+        <p class="text-muted small">
+          After scanning, enter the current 6-digit code shown by your authenticator
+          to confirm the secret was stored correctly.
+        </p>
+        <form method="POST">
+          <input type="hidden" name="action" value="verify">
+          <div class="mb-3">
+            <label for="code" class="form-label">6-digit code</label>
+            <input type="text" inputmode="numeric" autocomplete="one-time-code"
+                   class="form-control" id="code" name="code"
+                   pattern="[0-9]{6}" maxlength="6" required autofocus>
+          </div>
+          <button type="submit" class="btn btn-primary">
+            <i class="bi bi-check-circle"></i> Verify and Enable
+          </button>
+        </form>
+
+        <hr/>
+
+        <form method="POST" class="m-0">
+          <input type="hidden" name="action" value="skip">
+          <button type="submit" class="btn btn-outline-secondary">
+            Skip for now
+          </button>
+          <small class="text-muted ms-2">You can enable TOTP later from Profile.</small>
+        </form>
+      </div>
+    </div>
+  </div>
+</div>
+{% endblock %}

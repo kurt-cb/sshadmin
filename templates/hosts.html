@@ -20,6 +20,7 @@
                         <th>Hostname</th>
                         <th>Status</th>
                         <th>Description</th>
+                        {% if viewing_as_admin %}<th>Owners</th>{% endif %}
                         <th>Added By</th>
                         <th>Created</th>
                         <th>Actions</th>
@@ -51,6 +52,11 @@
                                 <span class="text-muted">-</span>
                             {% endif %}
                         </td>
+                        {% if viewing_as_admin %}
+                        <td>
+                            {% for o in host.owners %}<span class="badge bg-light text-dark border me-1">{{ o.username }}</span>{% endfor %}
+                        </td>
+                        {% endif %}
                         <td>{{ host.creator.username }}</td>
                         <td>{{ host.created_at.strftime('%Y-%m-%d') }}</td>
                         <td>
