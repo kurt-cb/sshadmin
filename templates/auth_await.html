@@ -46,9 +46,63 @@
   </div>
 </div>
 
+{% if ssh_available %}
+<div class="card mb-3">
+  <div class="card-header">Option 2: SSH (works in OpenSSH, plink, PuTTY, TeraTerm)</div>
+  <div class="card-body">
+    <p class="text-muted small mb-3">
+      Use this if you can't run the curl/bash one-liner &mdash; e.g. from a
+      Windows workstation with PuTTY or TeraTerm. Any SSH client that does
+      public-key authentication works.
+    </p>
+
+    <p class="text-muted small mb-1"><strong>One-shot form</strong> (OpenSSH / plink):</p>
+    <div class="copy-wrap">
+      <button class="btn btn-sm btn-secondary copy-btn" id="copy-ssh-exec" type="button">
+        <i class="bi bi-clipboard"></i> Copy
+      </button>
+      <pre class="cmd m-0" id="ssh-exec">ssh -p {{ ssh_port }} {{ username }}@{{ ssh_host }} auth {{ challenge.token }}</pre>
+    </div>
+    <p class="text-muted small mt-2 mb-3">
+      Submits the token as the SSH command and exits immediately. The browser
+      polls every few seconds and will redirect once the server has consumed
+      the token.
+    </p>
+
+    <hr/>
+
+    <p class="text-muted small mb-1">
+      <strong>Interactive form</strong> (works in PuTTY / TeraTerm and any
+      SSH client that opens a shell):
+    </p>
+    <div class="copy-wrap mb-2">
+      <button class="btn btn-sm btn-secondary copy-btn" id="copy-ssh-cmd" type="button">
+        <i class="bi bi-clipboard"></i> Copy
+      </button>
+      <pre class="cmd m-0" id="ssh-cmd">ssh -p {{ ssh_port }} {{ username }}@{{ ssh_host }}</pre>
+    </div>
+    <p class="text-muted small mb-1">
+      sshadmin prints a welcome message and prompts <code>Token:</code>.
+      Paste the token below and press Enter:
+    </p>
+    <div class="copy-wrap">
+      <button class="btn btn-sm btn-secondary copy-btn" id="copy-ssh-token" type="button">
+        <i class="bi bi-clipboard"></i> Copy
+      </button>
+      <pre class="cmd m-0" id="ssh-token">{{ challenge.token }}</pre>
+    </div>
+    <p class="text-muted small mt-3 mb-0">
+      For PuTTY/TeraTerm to auto-accept the auth server's host key, configure
+      the sshadmin CA as a trusted host CA. Steps are on the
+      <a href="{{ url_for('server_config') }}">Server Config</a> page (admin only).
+    </p>
+  </div>
+</div>
+{% endif %}
+
 {% if totp_available %}
 <div class="card mb-3">
-  <div class="card-header">Option 2: TOTP code</div>
+  <div class="card-header">Option 3: TOTP code</div>
   <div class="card-body">
     <p class="text-muted small mb-2">
       Enter the 6-digit code from your authenticator app. Either method works
@@ -94,14 +148,22 @@
 {% block extra_js %}
 <script>
   (function() {
-    var btn = document.getElementById('copy-oneliner');
-    btn.addEventListener('click', function() {
-      navigator.clipboard.writeText(document.getElementById('oneliner').innerText).then(function() {
-        var orig = btn.innerHTML;
-        btn.innerHTML = '<i class="bi bi-check2"></i> Copied';
-        setTimeout(function() { btn.innerHTML = orig; }, 1500);
+    function wireCopy(btnId, srcId) {
+      var btn = document.getElementById(btnId);
+      if (!btn) return;
+      btn.addEventListener('click', function() {
+        var src = document.getElementById(srcId);
+        navigator.clipboard.writeText(src.innerText).then(function() {
+          var orig = btn.innerHTML;
+          btn.innerHTML = '<i class="bi bi-check2"></i> Copied';
+          setTimeout(function() { btn.innerHTML = orig; }, 1500);
+        });
       });
-    });
+    }
+    wireCopy('copy-oneliner', 'oneliner');
+    wireCopy('copy-ssh-cmd', 'ssh-cmd');
+    wireCopy('copy-ssh-token', 'ssh-token');
+    wireCopy('copy-ssh-exec', 'ssh-exec');
 
     var statusEl = document.getElementById('status-text');
     var detailEl = document.getElementById('status-detail');

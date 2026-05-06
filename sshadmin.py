@@ -140,8 +140,16 @@ class Certificate(db.Model):
     created_at = db.Column(db.DateTime, default=datetime.utcnow)
     created_by_id = db.Column(db.Integer, db.ForeignKey('user.id'), nullable=False)
     certificate_data = db.Column(db.Text)  # OpenSSH certificate format
-    
+
+    # One-time install token for the curl-based install one-liner.
+    install_token = db.Column(db.String(64), unique=True, nullable=True, index=True)
+    install_token_expires_at = db.Column(db.DateTime, nullable=True)
+
     creator = db.relationship('User', backref='issued_certificates')
+
+    def issue_install_token(self, ttl_hours=2):
+        self.install_token = secrets.token_urlsafe(32)
+        self.install_token_expires_at = datetime.utcnow() + timedelta(hours=ttl_hours)
 
 
 # ==================== Login Manager ====================
@@ -345,6 +353,7 @@ _CA_SETUP_ALLOWED_ENDPOINTS = {
     'api_auth_script', 'api_auth_status', 'api_challenge_response',
     'api_totp_response',
     'api_enroll_script', 'api_enroll_host',
+    'api_cert_install_data', 'api_cert_install_script',
 }
 
 
@@ -605,6 +614,13 @@ def auth_await(token):
 
     totp_available = challenge.purpose == 'login' and challenge.user.totp_enabled
 
+    # Surface the SSH alt-auth path (port + host) so the page can render the
+    # `ssh user@host` example. Host defaults to whatever the browser used to
+    # reach us, with port stripped.
+    ssh_host = os.environ.get('SSHADMIN_SSH_PUBLIC_HOST') or request.host.split(':')[0]
+    ssh_port = int(os.environ.get('SSHADMIN_SSH_PORT', '2222'))
+    ssh_available = os.environ.get('SSHADMIN_DISABLE_SSH_AUTH', '0') != '1'
+
     return render_template(
         'auth_await.html',
         challenge=challenge,
@@ -613,6 +629,9 @@ def auth_await(token):
         purpose=challenge.purpose,
         username=challenge.user.username,
         totp_available=totp_available,
+        ssh_available=ssh_available,
+        ssh_host=ssh_host,
+        ssh_port=ssh_port,
     )
 
 
@@ -1062,11 +1081,12 @@ def issue_user_cert():
                     created_by_id=current_user.id,
                     certificate_data=cert_data
                 )
+                cert.issue_install_token()
                 db.session.add(cert)
                 db.session.commit()
-                
+
                 flash(f'User certificate issued for {ssh_user.username}', 'success')
-                return redirect(url_for('certificates'))
+                return redirect(url_for('cert_install', cert_id=cert.id))
             finally:
                 os.unlink(temp_key)
         except Exception as e:
@@ -1120,11 +1140,12 @@ def issue_host_cert():
                     created_by_id=current_user.id,
                     certificate_data=cert_data
                 )
+                cert.issue_install_token()
                 db.session.add(cert)
                 db.session.commit()
-                
+
                 flash(f'Host certificate issued for {host.hostname}', 'success')
-                return redirect(url_for('certificates'))
+                return redirect(url_for('cert_install', cert_id=cert.id))
             finally:
                 os.unlink(temp_key)
         except Exception as e:
@@ -1136,11 +1157,122 @@ def issue_host_cert():
 @app.route('/certificates/<int:cert_id>/download')
 @login_required
 def download_cert(cert_id):
-    """Download certificate"""
+    """Return the OpenSSH-format certificate as a file."""
     cert = Certificate.query.get_or_404(cert_id)
-    # Implementation for actual file download would go here
-    flash('Download functionality to be implemented', 'info')
-    return redirect(url_for('certificates'))
+    if not (current_user.is_admin or cert.created_by_id == current_user.id):
+        flash('You can only download certificates you issued.', 'danger')
+        return redirect(url_for('certificates'))
+    if not cert.certificate_data:
+        flash('Certificate has no data on file.', 'danger')
+        return redirect(url_for('certificates'))
+    name = (cert.host.hostname if cert.cert_type == 'host' and cert.host
+            else (cert.user.username if cert.user else cert.serial))
+    filename = f'sshadmin-{cert.cert_type}-{name}-cert.pub'
+    return Response(
+        cert.certificate_data + '\n',
+        mimetype='text/plain',
+        headers={'Content-Disposition': f'attachment; filename={filename}'},
+    )
+
+
+@app.route('/certificates/<int:cert_id>/install')
+@login_required
+def cert_install(cert_id):
+    """Show the install one-liner + manual instructions for a certificate."""
+    cert = Certificate.query.get_or_404(cert_id)
+    if not (current_user.is_admin or cert.created_by_id == current_user.id):
+        flash('You can only install certificates you issued.', 'danger')
+        return redirect(url_for('certificates'))
+
+    if not cert.install_token or (
+        cert.install_token_expires_at and cert.install_token_expires_at < datetime.utcnow()
+    ):
+        cert.issue_install_token()
+        db.session.commit()
+        flash('Install token expired; a fresh one was issued.', 'info')
+
+    server_url = request.url_root.rstrip('/')
+    install_url = (
+        f"{server_url}{url_for('api_cert_install_script')}"
+        f"?token={cert.install_token}"
+    )
+    if cert.cert_type == 'host':
+        one_liner = f'curl -fsSL "{install_url}" | sudo bash'
+    else:
+        one_liner = f'curl -fsSL "{install_url}" | bash'
+
+    fingerprint = None
+    try:
+        with tempfile.NamedTemporaryFile(mode='w', delete=False, suffix='-cert.pub') as f:
+            f.write(cert.certificate_data or '')
+            tmp = f.name
+        try:
+            r = subprocess.run(['ssh-keygen', '-L', '-f', tmp],
+                               capture_output=True, text=True, check=True)
+            fingerprint = r.stdout.strip()
+        finally:
+            os.unlink(tmp)
+    except Exception:
+        fingerprint = None
+
+    target_name = (cert.host.hostname if cert.cert_type == 'host' and cert.host
+                   else (cert.user.username if cert.user else 'unknown'))
+    return render_template(
+        'cert_install.html',
+        cert=cert,
+        one_liner=one_liner,
+        install_url=install_url,
+        target_name=target_name,
+        fingerprint=fingerprint,
+        ttl_hours=2,
+    )
+
+
+# ===== Public install endpoints (token-gated, no session required) =====
+
+def _lookup_install_cert(token):
+    """Returns (cert, error_response_or_None)."""
+    if not token:
+        return None, ('# token query parameter required\n', 400, {'Content-Type': 'text/plain'})
+    cert = Certificate.query.filter_by(install_token=token).first()
+    if cert is None:
+        return None, ('# invalid install token\n', 404, {'Content-Type': 'text/plain'})
+    if cert.install_token_expires_at and cert.install_token_expires_at < datetime.utcnow():
+        return None, ('# install token expired\n', 410, {'Content-Type': 'text/plain'})
+    return cert, None
+
+
+@app.route('/api/cert/install/data')
+def api_cert_install_data():
+    """Return the certificate body in OpenSSH format. Token-gated; single-use lookup."""
+    token = (request.args.get('token') or '').strip()
+    cert, err = _lookup_install_cert(token)
+    if err is not None:
+        return err
+    body = (cert.certificate_data or '').strip() + '\n'
+    return Response(body, mimetype='text/plain; charset=utf-8')
+
+
+@app.route('/api/cert/install/script')
+def api_cert_install_script():
+    """Return a bash script that installs the certificate at the right path."""
+    token = (request.args.get('token') or '').strip()
+    cert, err = _lookup_install_cert(token)
+    if err is not None:
+        return err
+
+    target_name = (cert.host.hostname if cert.cert_type == 'host' and cert.host
+                   else (cert.user.username if cert.user else 'unknown'))
+    server_url = request.url_root.rstrip('/')
+    script = render_template(
+        'cert_install_script.sh',
+        server_url=server_url,
+        token=cert.install_token,
+        cert_type=cert.cert_type,
+        cert_pubkey_line=(cert.public_key or '').strip(),
+        target_name=target_name,
+    )
+    return Response(script, mimetype='text/x-shellscript; charset=utf-8')
 
 
 @app.route('/api/ca-status')
@@ -1209,33 +1341,7 @@ def api_challenge_response():
 
     challenge.consumed_at = datetime.utcnow()
 
-    if challenge.purpose == 'register':
-        if challenge.user.completed_at is None:
-            # Promote first completed user to admin.
-            existing_admin = (
-                User.query
-                .filter(User.completed_at.isnot(None), User.is_admin == True)  # noqa: E712
-                .first()
-            )
-            if existing_admin is None:
-                challenge.user.is_admin = True
-            challenge.user.completed_at = datetime.utcnow()
-
-            # Auto-create an SSHUser identity from the registration data so the
-            # new login user can immediately be issued certificates without a
-            # separate /users/add step. Skip silently if a matching identity
-            # already exists (UniqueConstraint on username+public_key).
-            already = SSHUser.query.filter_by(
-                username=challenge.user.username,
-                public_key=challenge.user.public_key,
-            ).first()
-            if already is None:
-                db.session.add(SSHUser(
-                    username=challenge.user.username,
-                    public_key=challenge.user.public_key,
-                    description='Auto-created at registration',
-                    created_by_id=challenge.user.id,
-                ))
+    _finalize_consumed_challenge(challenge)
 
     host_result = {'enrolled': False}
     if hostname and host_pubkey:
@@ -1260,6 +1366,44 @@ def _pubkey_match(a, b):
     pa = (a or '').split()
     pb = (b or '').split()
     return len(pa) >= 2 and len(pb) >= 2 and pa[0] == pb[0] and pa[1] == pb[1]
+
+
+def _finalize_consumed_challenge(challenge):
+    """Apply post-consume side effects of a registration challenge.
+
+    Caller must have already set `challenge.consumed_at` and ensured the
+    consumer was authorized. This function is a no-op for login challenges.
+    Caller is responsible for db.session.commit().
+    """
+    if challenge.purpose != 'register':
+        return
+    if challenge.user.completed_at is not None:
+        return
+
+    # Promote the first completed user to admin.
+    existing_admin = (
+        User.query
+        .filter(User.completed_at.isnot(None), User.is_admin == True)  # noqa: E712
+        .first()
+    )
+    if existing_admin is None:
+        challenge.user.is_admin = True
+    challenge.user.completed_at = datetime.utcnow()
+
+    # Auto-create an SSHUser identity from the registration data so the
+    # new login user can immediately be issued certificates without a
+    # separate /users/add step.
+    already = SSHUser.query.filter_by(
+        username=challenge.user.username,
+        public_key=challenge.user.public_key,
+    ).first()
+    if already is None:
+        db.session.add(SSHUser(
+            username=challenge.user.username,
+            public_key=challenge.user.public_key,
+            description='Auto-created at registration',
+            created_by_id=challenge.user.id,
+        ))
 
 
 def _try_enroll_host_during_register(user, hostname, host_pubkey):
@@ -1485,8 +1629,34 @@ def _log_startup_status():
         )
 
 
+def _start_ssh_auth_server_if_enabled():
+    """Start the SSH-based alternative auth server if not disabled."""
+    if os.environ.get('SSHADMIN_DISABLE_SSH_AUTH', '0') == '1':
+        return None
+    port = int(os.environ.get('SSHADMIN_SSH_PORT', '2222'))
+    bind = os.environ.get('SSHADMIN_SSH_BIND', '0.0.0.0')
+    public_host = os.environ.get('SSHADMIN_SSH_PUBLIC_HOST', '*')
+    try:
+        from ssh_auth_server import start_ssh_auth_server
+        sock = start_ssh_auth_server(
+            app=app, db=db,
+            models={'User': User, 'Challenge': Challenge},
+            host=bind, port=port,
+            ca_key_path=cert_gen.ca_key if cert_gen.check_ca_keys() else None,
+            host_principals=['sshadmin', public_host or '*'],
+        )
+        actual_port = sock.getsockname()[1]
+        cert_note = ' (host key signed by CA)' if cert_gen.check_ca_keys() else ''
+        print(f'[sshadmin] SSH auth server listening on {bind}:{actual_port}{cert_note}', flush=True)
+        return sock
+    except Exception as exc:  # pragma: no cover - best-effort startup notice
+        print(f'[sshadmin] WARNING: SSH auth server not started: {exc}', flush=True)
+        return None
+
+
 if __name__ == '__main__':
     with app.app_context():
         db.create_all()
     _log_startup_status()
-    app.run(debug=True, host='0.0.0.0', port=5000)
+    _start_ssh_auth_server_if_enabled()
+    app.run(debug=True, host='0.0.0.0', port=5000, use_reloader=False)

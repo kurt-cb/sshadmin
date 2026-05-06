@@ -1,0 +1,148 @@
+{% extends "base.html" %}
+
+{% block title %}Install Certificate &mdash; {{ target_name }}{% endblock %}
+
+{% block extra_css %}
+<style>
+  pre.cmd {
+    background-color: #1e1e1e;
+    color: #d4d4d4;
+    padding: 1rem;
+    border-radius: 6px;
+    font-size: 0.85rem;
+    line-height: 1.4;
+    overflow: auto;
+  }
+  .copy-wrap { position: relative; }
+  .copy-btn  { position: absolute; top: 0.5rem; right: 0.5rem; }
+</style>
+{% endblock %}
+
+{% block content %}
+<h1 class="mb-3">
+  Install {% if cert.cert_type == 'host' %}Host{% else %}User{% endif %} Certificate
+  &mdash; <code>{{ target_name }}</code>
+</h1>
+
+<div class="alert alert-info">
+  Certificate signed by the sshadmin CA. The install token below is single-use
+  and expires after {{ ttl_hours }} hours. After install, sshd / ssh will use
+  the certificate automatically once placed at the right path.
+</div>
+
+{% if cert.cert_type == 'host' %}
+<div class="card mb-3">
+  <div class="card-header">One-liner (run as root on <code>{{ target_name }}</code>)</div>
+  <div class="card-body copy-wrap">
+    <button class="btn btn-sm btn-secondary copy-btn" type="button" id="copy-oneliner">
+      <i class="bi bi-clipboard"></i> Copy
+    </button>
+    <pre class="cmd m-0" id="oneliner">{{ one_liner }}</pre>
+    <p class="text-muted small mt-2 mb-0">
+      Writes the cert to <code>/etc/ssh/ssh_host_ecdsa_key-cert.pub</code>,
+      adds a <code>HostCertificate</code> drop-in under
+      <code>/etc/ssh/sshd_config.d/</code>, and reloads sshd.
+    </p>
+  </div>
+</div>
+{% else %}
+<div class="card mb-3">
+  <div class="card-header">One-liner (run on the workstation that holds your private key)</div>
+  <div class="card-body copy-wrap">
+    <button class="btn btn-sm btn-secondary copy-btn" type="button" id="copy-oneliner">
+      <i class="bi bi-clipboard"></i> Copy
+    </button>
+    <pre class="cmd m-0" id="oneliner">{{ one_liner }}</pre>
+    <p class="text-muted small mt-2 mb-0">
+      The script searches <code>~/.ssh/*.pub</code> for the public key the cert
+      was issued against and writes the cert next to it as
+      <code>&lt;basename&gt;-cert.pub</code>, which is the path
+      <code>ssh</code> consults automatically.
+    </p>
+  </div>
+</div>
+{% endif %}
+
+<div class="card mb-3">
+  <div class="card-header">Manual install</div>
+  <div class="card-body">
+    {% if cert.cert_type == 'host' %}
+    <p class="text-muted small">
+      If you'd rather not pipe to bash, do it by hand:
+    </p>
+    <ol class="small">
+      <li>Download the cert:
+        <pre class="cmd m-0">curl -fsSL "{{ install_url|replace('install/script', 'install/data') }}" -o /etc/ssh/ssh_host_ecdsa_key-cert.pub
+sudo chmod 0644 /etc/ssh/ssh_host_ecdsa_key-cert.pub</pre>
+      </li>
+      <li>Add this line to <code>/etc/ssh/sshd_config</code> (or a drop-in under
+        <code>/etc/ssh/sshd_config.d/</code>):
+        <pre class="cmd m-0">HostCertificate /etc/ssh/ssh_host_ecdsa_key-cert.pub</pre>
+      </li>
+      <li>Reload sshd:
+        <pre class="cmd m-0">sudo systemctl reload ssh   # or: sudo systemctl reload sshd</pre>
+      </li>
+      <li>Verify:
+        <pre class="cmd m-0">sudo sshd -T | grep -i hostcertificate
+ssh-keygen -L -f /etc/ssh/ssh_host_ecdsa_key-cert.pub</pre>
+      </li>
+    </ol>
+    {% else %}
+    <p class="text-muted small">
+      If you'd rather not pipe to bash, do it by hand. The cert filename must
+      match your private key's basename + <code>-cert.pub</code>:
+    </p>
+    <ol class="small">
+      <li>Download the cert next to your matching private key:
+        <pre class="cmd m-0">curl -fsSL "{{ install_url|replace('install/script', 'install/data') }}" \
+  -o ~/.ssh/id_ecdsa-cert.pub   # use the basename of your key
+chmod 0644 ~/.ssh/id_ecdsa-cert.pub</pre>
+      </li>
+      <li>(Optional) If you want to point ssh at a non-standard cert path,
+        add to <code>~/.ssh/config</code>:
+        <pre class="cmd m-0">Host my-server
+    IdentityFile ~/.ssh/id_ecdsa
+    CertificateFile ~/.ssh/id_ecdsa-cert.pub</pre>
+      </li>
+      <li>Verify the cert and its principals:
+        <pre class="cmd m-0">ssh-keygen -L -f ~/.ssh/id_ecdsa-cert.pub</pre>
+      </li>
+    </ol>
+    {% endif %}
+  </div>
+</div>
+
+{% if fingerprint %}
+<div class="card mb-3">
+  <div class="card-header">Certificate details</div>
+  <div class="card-body">
+    <pre class="bg-light p-3 rounded small mb-0" style="white-space: pre-wrap;">{{ fingerprint }}</pre>
+  </div>
+</div>
+{% endif %}
+
+<div class="d-flex gap-2">
+  <a href="{{ url_for('download_cert', cert_id=cert.id) }}" class="btn btn-outline-primary">
+    <i class="bi bi-download"></i> Download cert file
+  </a>
+  <a href="{{ url_for('certificates') }}" class="btn btn-secondary ms-auto">
+    Back to Certificates
+  </a>
+</div>
+{% endblock %}
+
+{% block extra_js %}
+<script>
+  (function() {
+    var btn = document.getElementById('copy-oneliner');
+    if (!btn) return;
+    btn.addEventListener('click', function() {
+      navigator.clipboard.writeText(document.getElementById('oneliner').innerText).then(function() {
+        var orig = btn.innerHTML;
+        btn.innerHTML = '<i class="bi bi-check2"></i> Copied';
+        setTimeout(function() { btn.innerHTML = orig; }, 1500);
+      });
+    });
+  })();
+</script>
+{% endblock %}

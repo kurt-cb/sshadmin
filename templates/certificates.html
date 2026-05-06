@@ -29,6 +29,7 @@
                         <th>Valid Until</th>
                         <th>Issued By</th>
                         <th>Status</th>
+                        <th>Actions</th>
                     </tr>
                 </thead>
                 <tbody>
@@ -62,6 +63,16 @@
                             {% else %}
                                 <span class="badge bg-danger">Expired</span>
                             {% endif %}
+                        </td>
+                        <td>
+                            <div class="btn-group btn-group-sm" role="group">
+                                <a href="{{ url_for('cert_install', cert_id=cert.id) }}" class="btn btn-primary" title="Install instructions">
+                                    <i class="bi bi-download"></i> Install
+                                </a>
+                                <a href="{{ url_for('download_cert', cert_id=cert.id) }}" class="btn btn-outline-secondary" title="Download cert file">
+                                    <i class="bi bi-file-earmark-arrow-down"></i>
+                                </a>
+                            </div>
                         </td>
                     </tr>
                     {% endfor %}
