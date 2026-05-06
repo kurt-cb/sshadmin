@@ -274,13 +274,15 @@ class SSHCertificateGenerator:
         """Generate SSH user certificate"""
         if principals is None:
             principals = [username]
-        
-        valid_after = int(datetime.utcnow().timestamp())
-        valid_before = int((datetime.utcnow() + timedelta(days=valid_days)).timestamp())
-        
+
+        # ssh-keygen -V wants YYYYMMDDHHMMSS in the local timezone, not Unix epoch.
+        now = datetime.utcnow()
+        valid_after = now.strftime('%Y%m%d%H%M%S')
+        valid_before = (now + timedelta(days=valid_days)).strftime('%Y%m%d%H%M%S')
+
         # Certificate serial (can be any unique number)
-        serial = int(datetime.utcnow().timestamp() * 1000)
-        
+        serial = int(now.timestamp() * 1000)
+
         try:
             cmd = [
                 'ssh-keygen',
@@ -293,7 +295,9 @@ class SSHCertificateGenerator:
             ]
             
             result = subprocess.run(cmd, capture_output=True, text=True, check=True)
-            cert_path = f'{public_key_path}-cert.pub'
+            # ssh-keygen writes the cert at `<input-without-.pub>-cert.pub`.
+            base = public_key_path[:-4] if public_key_path.endswith('.pub') else public_key_path
+            cert_path = f'{base}-cert.pub'
             
             if os.path.exists(cert_path):
                 with open(cert_path, 'r') as f:
@@ -309,10 +313,11 @@ class SSHCertificateGenerator:
         """Generate SSH host certificate"""
         if isinstance(hostnames, str):
             hostnames = [hostnames]
-        
-        valid_after = int(datetime.utcnow().timestamp())
-        valid_before = int((datetime.utcnow() + timedelta(days=valid_days)).timestamp())
-        serial = int(datetime.utcnow().timestamp() * 1000)
+
+        now = datetime.utcnow()
+        valid_after = now.strftime('%Y%m%d%H%M%S')
+        valid_before = (now + timedelta(days=valid_days)).strftime('%Y%m%d%H%M%S')
+        serial = int(now.timestamp() * 1000)
         
         try:
             cmd = [
@@ -327,7 +332,9 @@ class SSHCertificateGenerator:
             ]
             
             result = subprocess.run(cmd, capture_output=True, text=True, check=True)
-            cert_path = f'{public_key_path}-cert.pub'
+            # ssh-keygen writes the cert at `<input-without-.pub>-cert.pub`.
+            base = public_key_path[:-4] if public_key_path.endswith('.pub') else public_key_path
+            cert_path = f'{base}-cert.pub'
             
             if os.path.exists(cert_path):
                 with open(cert_path, 'r') as f:

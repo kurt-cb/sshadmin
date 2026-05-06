@@ -251,6 +251,7 @@ def _consume_token(token, authenticated_user_id, app, models):
 
 def _serve_interactive(channel, server_iface, app, models):
     """Interactive shell mode: print banner, prompt for token, consume."""
+    exit_status = 0
     try:
         channel.send(WELCOME_BANNER.format(username=server_iface.username).encode())
         channel.send(b'Token: ')
@@ -260,17 +261,20 @@ def _serve_interactive(channel, server_iface, app, models):
 
         if token is None:
             channel.send(b'\r\nNo token received. Aborting without changes.\r\n')
+            exit_status = 1
             return
         if not token:
             channel.send(b'Empty input. Aborting.\r\n')
+            exit_status = 1
             return
 
         ok, message, _ = _consume_token(token, server_iface.user_id, app, models)
         prefix = 'OK: ' if ok else 'ERROR: '
         suffix = '\r\nSwitch back to your browser tab — it should redirect within a few seconds.\r\n' if ok else '\r\n'
         channel.send(f'\r\n{prefix}{message}{suffix}'.encode())
+        exit_status = 0 if ok else 1
     finally:
-        _close_channel(channel)
+        _close_channel(channel, exit_status=exit_status)
 
 
 def _serve_exec(channel, server_iface, app, models):
@@ -281,32 +285,32 @@ def _serve_exec(channel, server_iface, app, models):
     """
     cmd = (server_iface.exec_command or '').strip()
     parts = cmd.split(maxsplit=1)
+    exit_status = 1
     try:
         if len(parts) != 2 or parts[0] != 'auth':
             channel.send(b'Usage: ssh -p <port> <user>@<host> auth <token>\r\n')
-            try:
-                channel.send_exit_status(2)
-            except Exception:
-                pass
+            exit_status = 2
             return
 
         token = parts[1].strip()
         ok, message, _ = _consume_token(token, server_iface.user_id, app, models)
         if ok:
             channel.send(f'OK: {message}\r\n'.encode())
-            channel.send_exit_status(0)
+            exit_status = 0
         else:
             channel.send(f'ERROR: {message}\r\n'.encode())
-            channel.send_exit_status(1)
+            exit_status = 1
     finally:
-        _close_channel(channel)
+        _close_channel(channel, exit_status=exit_status)
 
 
-def _close_channel(channel):
-    try:
-        channel.send_exit_status(0)
-    except Exception:
-        pass
+def _close_channel(channel, exit_status=None):
+    """Close a channel; optionally set the exit status if not already sent."""
+    if exit_status is not None:
+        try:
+            channel.send_exit_status(exit_status)
+        except Exception:
+            pass
     try:
         channel.close()
     except Exception:
