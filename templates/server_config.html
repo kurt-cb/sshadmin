@@ -1,0 +1,106 @@
+{% extends "base.html" %}
+
+{% block title %}Server Configuration - SSH Certificate Admin{% endblock %}
+
+{% block content %}
+<div class="d-flex justify-content-between align-items-center mb-3">
+  <h1 class="m-0">Server Configuration</h1>
+  {% if ca_present %}
+    <span class="badge bg-success">CA configured</span>
+  {% else %}
+    <span class="badge bg-danger">CA missing</span>
+  {% endif %}
+</div>
+
+{% if not ca_present %}
+<div class="alert alert-warning d-flex justify-content-between align-items-center">
+  <span>The certificate authority has not been generated yet.</span>
+  <a href="{{ url_for('setup_ca') }}" class="btn btn-sm btn-warning">
+    <i class="bi bi-key"></i> Generate CA Now
+  </a>
+</div>
+{% endif %}
+
+<div class="row">
+  <div class="col-md-7">
+    <div class="card mb-3">
+      <div class="card-header">Certificate Authority</div>
+      <div class="card-body">
+        {% if ca_present %}
+        <dl class="row mb-3">
+          <dt class="col-sm-4">Key Path</dt>
+          <dd class="col-sm-8"><code>{{ ca_key_path }}</code></dd>
+
+          <dt class="col-sm-4">Public Key Path</dt>
+          <dd class="col-sm-8"><code>{{ ca_pubkey_path }}</code></dd>
+
+          <dt class="col-sm-4">Key Type</dt>
+          <dd class="col-sm-8"><code>{{ ca_key_type }}</code></dd>
+
+          {% if ca_fingerprint %}
+          <dt class="col-sm-4">Fingerprint</dt>
+          <dd class="col-sm-8"><code>{{ ca_fingerprint }}</code></dd>
+          {% endif %}
+        </dl>
+
+        <label class="form-label mb-1">CA Public Key</label>
+        <div class="position-relative">
+          <button class="btn btn-sm btn-secondary position-absolute"
+                  style="top: 0.5rem; right: 0.5rem;" type="button" id="copy-capubkey">
+            <i class="bi bi-clipboard"></i> Copy
+          </button>
+          <pre class="bg-light p-3 rounded text-break" style="white-space: pre-wrap;" id="ca-pubkey">{{ ca_pubkey }}</pre>
+        </div>
+        <p class="small text-muted mb-0">
+          Hosts enrolled via the script fetch this from
+          <a href="{{ url_for('api_ca_pubkey') }}" target="_blank"><code>/api/ca-pubkey</code></a>.
+          Distribute it to clients so they trust certificates this server signs.
+        </p>
+        {% else %}
+        <p class="text-muted">No CA configured. <a href="{{ url_for('setup_ca') }}">Generate one</a>.</p>
+        {% endif %}
+      </div>
+    </div>
+  </div>
+
+  <div class="col-md-5">
+    <div class="card mb-3">
+      <div class="card-header">Server</div>
+      <div class="card-body">
+        <dl class="row mb-0">
+          <dt class="col-sm-5">Server URL</dt>
+          <dd class="col-sm-7"><code>{{ server_url }}</code></dd>
+
+          <dt class="col-sm-5">App Users</dt>
+          <dd class="col-sm-7">{{ counts.app_users }}</dd>
+
+          <dt class="col-sm-5">Hosts</dt>
+          <dd class="col-sm-7">{{ counts.enrolled_hosts }} enrolled / {{ counts.hosts }} total</dd>
+
+          <dt class="col-sm-5">SSH Users</dt>
+          <dd class="col-sm-7">{{ counts.ssh_users }}</dd>
+
+          <dt class="col-sm-5">Certificates</dt>
+          <dd class="col-sm-7">{{ counts.certificates }}</dd>
+        </dl>
+      </div>
+    </div>
+  </div>
+</div>
+{% endblock %}
+
+{% block extra_js %}
+<script>
+  var copyBtn = document.getElementById('copy-capubkey');
+  if (copyBtn) {
+    copyBtn.addEventListener('click', function() {
+      var pre = document.getElementById('ca-pubkey');
+      navigator.clipboard.writeText(pre.innerText).then(function() {
+        var orig = copyBtn.innerHTML;
+        copyBtn.innerHTML = '<i class="bi bi-check2"></i> Copied';
+        setTimeout(function() { copyBtn.innerHTML = orig; }, 1500);
+      });
+    });
+  }
+</script>
+{% endblock %}

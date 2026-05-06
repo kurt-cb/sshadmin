@@ -1,0 +1,92 @@
+{% extends "base.html" %}
+
+{% block title %}CA Setup - SSH Certificate Admin{% endblock %}
+
+{% block content %}
+<h1 class="mb-3">Generate Certificate Authority Keypair</h1>
+
+<div class="alert alert-warning">
+  <strong>One-time setup.</strong> The CA private key signs every host and user
+  certificate this server issues. Once generated it will be written to
+  <code>{{ ca_key_path }}</code> with permissions <code>0600</code>. Keep it
+  safe — losing it forces re-issuing every certificate; leaking it compromises
+  every host and user that trusts this CA.
+</div>
+
+<div class="row">
+  <div class="col-md-8">
+    <div class="card">
+      <div class="card-body">
+        <form method="POST">
+          <div class="mb-3">
+            <label for="comment" class="form-label">CA Identity / Comment <span class="text-danger">*</span></label>
+            <input type="text" class="form-control" id="comment" name="comment"
+                   placeholder="e.g. sshadmin CA - example.com" required>
+            <small class="form-text text-muted">
+              Embedded in the public key for human identification (the SSH equivalent of a CN/Subject).
+            </small>
+          </div>
+
+          <div class="row">
+            <div class="col-md-6 mb-3">
+              <label for="key_type" class="form-label">Key Type</label>
+              <select class="form-select" id="key_type" name="key_type">
+                <option value="ecdsa" selected>ecdsa (NIST P-curve)</option>
+                <option value="ed25519">ed25519</option>
+                <option value="rsa">rsa</option>
+              </select>
+            </div>
+            <div class="col-md-6 mb-3">
+              <label for="bits" class="form-label">Bits / Curve</label>
+              <select class="form-select" id="bits" name="bits">
+                <option value="521" selected>521 (P-521, ecdsa)</option>
+                <option value="384">384 (P-384, ecdsa)</option>
+                <option value="256">256 (P-256, ecdsa)</option>
+                <option value="0">n/a (ed25519)</option>
+                <option value="4096">4096 (rsa)</option>
+                <option value="3072">3072 (rsa)</option>
+                <option value="2048">2048 (rsa)</option>
+              </select>
+              <small class="form-text text-muted">Must match the key type above.</small>
+            </div>
+          </div>
+
+          <div class="form-check mb-3">
+            <input class="form-check-input" type="checkbox" id="confirm" name="confirm" required>
+            <label class="form-check-label" for="confirm">
+              I understand the CA private key will be written to
+              <code>{{ ca_key_path }}</code> and that I am responsible for
+              backing it up.
+            </label>
+          </div>
+
+          <div class="d-flex gap-2">
+            <button type="submit" class="btn btn-primary">
+              <i class="bi bi-key"></i> Generate CA
+            </button>
+            <a href="{{ url_for('dashboard') }}" class="btn btn-secondary">Cancel</a>
+          </div>
+        </form>
+      </div>
+    </div>
+  </div>
+
+  <div class="col-md-4">
+    <div class="card">
+      <div class="card-header">What happens next</div>
+      <div class="card-body small">
+        <p>The server runs:</p>
+        <pre class="bg-light p-2 rounded text-break">ssh-keygen -t &lt;type&gt; -b &lt;bits&gt; \
+  -f {{ ca_key_path }} \
+  -N "" \
+  -C "&lt;comment&gt;"</pre>
+        <p class="mb-0">
+          On success you'll be redirected to the Server Config page where you
+          can copy the public key. Hosts enrolled afterward will pick it up
+          automatically via <code>/api/ca-pubkey</code>.
+        </p>
+      </div>
+    </div>
+  </div>
+</div>
+{% endblock %}

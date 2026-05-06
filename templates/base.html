@@ -126,15 +126,44 @@
                 <span class="navbar-toggler-icon"></span>
             </button>
             <div class="collapse navbar-collapse" id="navbarNav">
+                {% if current_user.is_authenticated %}
+                <ul class="navbar-nav me-auto">
+                    <li class="nav-item">
+                        <a class="nav-link {% if request.endpoint == 'dashboard' %}active{% endif %}" href="{{ url_for('dashboard') }}">
+                            <i class="bi bi-speedometer2"></i> Dashboard
+                        </a>
+                    </li>
+                    <li class="nav-item">
+                        <a class="nav-link {% if request.endpoint and 'host' in request.endpoint %}active{% endif %}" href="{{ url_for('hosts') }}">
+                            <i class="bi bi-hdd-rack"></i> Registered Hosts
+                        </a>
+                    </li>
+                    <li class="nav-item">
+                        <a class="nav-link {% if request.endpoint in ('users', 'add_user', 'delete_user') %}active{% endif %}" href="{{ url_for('users') }}">
+                            <i class="bi bi-people"></i> Registered Users
+                        </a>
+                    </li>
+                    <li class="nav-item">
+                        <a class="nav-link {% if request.endpoint and 'certificate' in request.endpoint %}active{% endif %}" href="{{ url_for('certificates') }}">
+                            <i class="bi bi-file-earmark-lock"></i> Certificates
+                        </a>
+                    </li>
+                    {% if current_user.is_admin %}
+                    <li class="nav-item">
+                        <a class="nav-link {% if request.endpoint in ('server_config', 'setup_ca') %}active{% endif %}" href="{{ url_for('server_config') }}">
+                            <i class="bi bi-gear"></i> Server Config
+                        </a>
+                    </li>
+                    {% endif %}
+                </ul>
+                {% endif %}
                 <ul class="navbar-nav ms-auto">
                     {% if current_user.is_authenticated %}
                     <li class="nav-item dropdown">
                         <a class="nav-link dropdown-toggle" href="#" id="userDropdown" role="button" data-bs-toggle="dropdown">
-                            <i class="bi bi-person-circle"></i> {{ current_user.username }}
+                            <i class="bi bi-person-circle"></i> {{ current_user.username }}{% if current_user.is_admin %} <span class="badge bg-secondary">admin</span>{% endif %}
                         </a>
                         <ul class="dropdown-menu dropdown-menu-end" aria-labelledby="userDropdown">
-                            <li><a class="dropdown-item" href="/profile">Profile</a></li>
-                            <li><hr class="dropdown-divider"></li>
                             <li><a class="dropdown-item" href="/logout">Logout</a></li>
                         </ul>
                     </li>
@@ -150,40 +179,7 @@
     <div class="container-fluid">
         <div class="row">
             {% if current_user.is_authenticated %}
-            <nav class="col-md-2 d-md-block bg-light sidebar">
-                <div class="position-sticky pt-3">
-                    <ul class="nav flex-column">
-                        <li class="nav-item">
-                            <a class="nav-link {% if request.endpoint == 'dashboard' %}active{% endif %}" href="/dashboard">
-                                <i class="bi bi-speedometer2"></i> Dashboard
-                            </a>
-                        </li>
-                        <li class="nav-item">
-                            <a class="nav-link {% if 'host' in request.endpoint %}active{% endif %}" href="/hosts">
-                                <i class="bi bi-hdd-rack"></i> Hosts
-                            </a>
-                        </li>
-                        <li class="nav-item">
-                            <a class="nav-link {% if 'user' in request.endpoint %}active{% endif %}" href="/users">
-                                <i class="bi bi-people"></i> SSH Users
-                            </a>
-                        </li>
-                        <li class="nav-item">
-                            <a class="nav-link {% if 'certificate' in request.endpoint %}active{% endif %}" href="/certificates">
-                                <i class="bi bi-file-certificate"></i> Certificates
-                            </a>
-                        </li>
-                        {% if current_user.is_admin %}
-                        <li class="nav-item">
-                            <a class="nav-link" href="/admin">
-                                <i class="bi bi-gear"></i> Admin
-                            </a>
-                        </li>
-                        {% endif %}
-                    </ul>
-                </div>
-            </nav>
-            <main class="col-md-10 ms-sm-auto px-md-4 main-content">
+            <main class="col-12 main-content">
             {% else %}
             <main class="container">
             {% endif %}
