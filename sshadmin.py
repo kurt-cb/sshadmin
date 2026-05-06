@@ -425,12 +425,13 @@ def dashboard():
     users_count = SSHUser.query.count()
     certs_count = Certificate.query.count()
     recent_certs = Certificate.query.order_by(Certificate.created_at.desc()).limit(5).all()
-    
+
     return render_template('dashboard.html',
                          hosts_count=hosts_count,
                          users_count=users_count,
                          certs_count=certs_count,
-                         recent_certs=recent_certs)
+                         recent_certs=recent_certs,
+                         ca_configured=cert_gen.check_ca_keys())
 
 
 @app.route('/hosts')
