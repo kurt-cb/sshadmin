@@ -32,9 +32,7 @@ class User(UserMixin, db.Model):
     email = db.Column(db.String(120), unique=True, nullable=False)
     is_admin = db.Column(db.Boolean, default=False)
     created_at = db.Column(db.DateTime, default=datetime.utcnow)
-    
-    certificates = db.relationship('Certificate', backref='creator', lazy=True)
-    
+
     def set_password(self, password):
         self.password_hash = generate_password_hash(password)
     
@@ -57,6 +55,7 @@ class Host(db.Model):
 
 class SSHUser(db.Model):
     """SSH user model"""
+    __tablename__ = 'sshuser'
     id = db.Column(db.Integer, primary_key=True)
     username = db.Column(db.String(255), nullable=False)
     public_key = db.Column(db.Text, nullable=False)
@@ -210,7 +209,11 @@ def register():
         if User.query.filter_by(username=username).first():
             flash('Username already exists', 'danger')
             return redirect(url_for('register'))
-        
+
+        if User.query.filter_by(email=email).first():
+            flash('Email already registered', 'danger')
+            return redirect(url_for('register'))
+
         user = User(username=username, email=email)
         user.set_password(password)
         db.session.add(user)

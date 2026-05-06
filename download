@@ -1,0 +1,530 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+	<meta charset="UTF-8" />
+	<meta name="awa-expId" content="vscw_aaflight1016_control:103441;" />
+	<meta name="awa-env" content="prod" />
+	<meta name="viewport" content="width=device-width, initial-scale=1.0">
+	<meta name="google-site-verification" content="hNs7DXrTySP_X-0P_AC0WulAXvUwgSXEmgfcO2r79dw" />
+
+	<!-- Twitter and Facebook OpenGraph Metadata-->
+	<meta name="twitter:card" content="summary_large_image" />
+	<meta name="twitter:site" content="@code" />
+
+		<meta name="description" content="Visual Studio Code is free and available on your favorite platform - Linux, macOS, and Windows.  Download Visual Studio Code to experience a redefined code editor,  optimized for building and debugging modern web and cloud applications." />
+	<!-- Twitter and Facebook OpenGraph Metadata-->
+	<meta property="og:title" content="Download Visual Studio Code - Mac, Linux, Windows"/>
+	<meta property="og:description" content="Visual Studio Code is free and available on your favorite platform - Linux, macOS, and Windows.  Download Visual Studio Code to experience a redefined code editor,  optimized for building and debugging modern web and cloud applications."/>
+	<meta property="og:image" content="https://code.visualstudio.com/opengraphimg/opengraph-home.png"/>
+	<meta property="og:url" content="https://code.visualstudio.com/Download"/>
+	<link href="https://code.visualstudio.com/download" rel="canonical" />
+
+
+	<link rel="shortcut icon" href="/assets/favicon.ico" sizes="128x128" />
+	<link rel="apple-touch-icon" href="/assets/apple-touch-icon.png">
+
+	<title>Download Visual Studio Code - Mac, Linux, Windows</title>
+
+	<link rel="stylesheet" href="/dist/style.css">
+
+	<script src="https://consentdeliveryfd.azurefd.net/mscc/lib/v2/wcp-consent.js"></script>
+	<script type="text/javascript" src="https://js.monitor.azure.com/scripts/c/ms.analytics-web-4.min.js"></script>
+	
+	<script type="text/javascript">
+	// Leave as var; siteConsent is initialized and referenced elsewhere.
+	var siteConsent = null;
+	
+	const GPC_DataSharingOptIn = false;
+	WcpConsent.onInitCallback(function () {
+		window.appInsights = new oneDS.ApplicationInsights();
+		window.appInsights.initialize({
+			instrumentationKey: "1a3eb3104447440391ad5f2a6ee06a0a-62879566-bc58-4741-9650-302bf2af703f-7103",
+			propertyConfiguration: {
+				userConsented: false,
+				gpcDataSharingOptIn: false,
+				callback: {
+					userConsentDetails: siteConsent ? siteConsent.getConsent : undefined
+				},
+			},
+			cookieCfg: {
+				ignoreCookies: ["MSCC"]
+			},
+			webAnalyticsConfiguration:{ // Web Analytics Plugin configuration
+				urlCollectQuery: true,
+				urlCollectHash: true,
+				autoCapture: {
+					scroll: true,
+					pageView: true,
+					onLoad: true,
+					onUnload: true,
+					click: true,
+					resize: true,
+					jsError: true
+				}
+			}
+		}, []);
+	
+		window.appInsights.getPropertyManager().getPropertiesContext().web.gpcDataSharingOptIn = GPC_DataSharingOptIn;
+	});
+	</script>
+	<link rel="alternate" type="application/atom+xml" title="RSS Feed for code.visualstudio.com" href="/feed.xml" />
+</head>
+
+<body >
+	<!-- Setting theme here to avoid FOUC -->
+	<script>
+		function setTheme(themeName) {
+			if (themeName === 'dark') {
+				document.documentElement.removeAttribute('data-theme'); // dark is default, so no data-theme attribute needed
+			}
+
+			if (themeName === 'light') {
+				document.documentElement.setAttribute('data-theme', themeName);
+			}
+			return;
+		}
+
+		// Determine initial theme: user preference or system preference
+		let theme = localStorage.getItem('theme') || (window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light');
+		setTheme(theme); // Apply the initial theme
+
+		// Listen for changes in the system theme preference
+		window.matchMedia('(prefers-color-scheme: dark)').addListener(e => {
+			if (!localStorage.getItem('theme')) { // Only if no user preference is saved
+				setTheme(e.matches ? 'dark' : 'light');
+			}
+		});
+	</script>
+
+	<div id="main">
+		<div class="navbar-fixed-container">
+			<div class="navbar navbar-inverse navbar-fixed-top ">
+				<div id='cookie-banner'></div>		<nav role="navigation" aria-label="Top Level">
+					<div class="container">
+						<div class="nav navbar-header">
+							<a class="navbar-brand" href="/"><span>Visual Studio Code</span></a>
+						</div>
+						<div class="navbar-collapse collapse">
+							<ul class="nav navbar-nav navbar-left">
+								<li class="nav-dropdown">
+									<a id="nav-features" href="#" class="nav-dropdown-toggle" role="button" aria-haspopup="true" aria-expanded="false">
+										Features <span class="nav-dropdown-caret" aria-hidden="true"></span>
+									</a>
+									<ul class="nav-dropdown-menu" role="menu">
+										<li role="none"><a role="menuitem" href="/features/agents">Agents</a></li>
+									</ul>
+								</li>
+								<li class="nav-dropdown">
+									<a id="nav-docs" href="#" class="nav-dropdown-toggle" role="button" aria-haspopup="true" aria-expanded="false">
+										Docs <span class="nav-dropdown-caret" aria-hidden="true"></span>
+									</a>
+									<ul class="nav-dropdown-menu" role="menu">
+										<li role="none"><a role="menuitem" href="/docs">Documentation</a></li>
+										<li role="none"><a role="menuitem" href="/api">API</a></li>
+									</ul>
+								</li>
+								<li ><a id="nav-updates" href="/updates">Updates</a>
+								</li>
+								<li ><a id="nav-blogs" href="/blogs">Blog</a></li>
+								<li><a href="https://marketplace.visualstudio.com/VSCode" target="_blank" rel="noopener"
+										id="nav-extensions">Extensions</a></li>
+								<li ><a id="nav-mcp" href="/mcp">MCP</a></li>
+								<li ><a id="nav-faqs" href="/docs/supporting/faq">FAQ</a>
+								</li>
+								<li ><a id="nav-learn" href="/learn">Learn</a></li>
+								<li><a id="nav-events" href="https://aka.ms/vscode/live" target="_blank" rel="noopener">Events</a></li>
+							</ul>
+							<ul class="nav navbar-nav navbar-right" role="presentation">
+								<li>
+									<a class="link-button" href="/Download" id="nav-download">
+										<span>Download</span>
+									</a>
+								</li>
+							</ul>
+						</div>
+						<div class="navbar-actions">
+							<div class="search" role="presentation">
+								<div class="nav-search search-control" role="button" tabindex="0" aria-label="Open search dialog">
+									<div class="input-group" role="presentation">
+										<span class="input-group-btn">
+											<span class="btn search-icon-container" aria-hidden="true">
+												<img class="search-icon-dark" src="/assets/icons/search-dark.svg" alt="" />
+												<img class="search-icon-light" src="/assets/icons/search.svg" alt="" />
+											</span>
+										</span>
+										<span class="search-box form-control" aria-hidden="true" role="presentation"></span>
+										<span class="search-shortcut-placeholder">Search</span>
+										<span class="search-shortcut-overlay"></span>
+									</div>
+								</div>					</div>
+							<button type="button" class="theme-switch" id="theme-toggle">
+								<img class="theme-icon-light" src="/assets/icons/theme-light.svg" alt="Switch to the dark theme" />
+								<img class="theme-icon-dark" src="/assets/icons/theme-dark.svg" alt="Switch to the light theme" />
+							</button>
+							<a class="link-button navbar-actions-download" href="/Download">
+								<span>Download</span>
+							</a>
+						</div>
+						<button type="button" class="navbar-toggle" data-toggle="collapse" data-target=".navbar-collapse"
+							aria-label="Expand and Collapse Menu">
+							<span class="icon-bar"></span>
+							<span class="icon-bar"></span>
+							<span class="icon-bar"></span>
+						</button>
+					</div>
+				</nav>
+			</div>
+		</div>		<div data-announcement-version="2026-05-06-integrated-browser" class="updates-banner js-hidden  ">
+			<div class="container">
+				<p class="message">Get started  <a href="https://code.visualstudio.com/docs/copilot/guides/browser-agent-testing-guide?source&#x3D;vsc-website-banner" target="_blank" rel="noopener" id="banner-link-updates">building web apps with the integrated browser and AI agents!</a></p>
+			</div>
+			<div tabindex="0" role="button" title="Dismiss this update" class="dismiss-btn" id="banner-dismiss-btn"><span class="sr-only">Dismiss this update</span><span aria-hidden="true" class="glyph-icon"></span></div>
+		</div>
+		<!-- This div wraps around the entire site -->
+		<!-- The body itself should already have a main tag -->
+		<main id="main-content">
+			<div class="body-content downloads">
+
+	<div class="container">
+		<div class="row">
+			<div class="container text-center">
+				<h1>Download Visual Studio Code</h1>
+				<p class="lead">
+					Free and built on open source.  Integrated Git, debugging and extensions.
+				</p>
+			</div>
+		</div>
+	</div>
+
+	<div id="alt-downloads" class="swimlane alt-downloads download-buttons">
+		<div class="buttons">
+			<div class="download">
+				<div class="logo windows"></div>
+				<button class="link-button dlink" data-os="win" id="download-alt-win" aria-label="Windows download" role="link">
+					<img class="download-icon" src="/assets/icons/download.svg" width="18px" height="18px" alt="Download VS Code" />
+					<img class="download-icon-accessible" src="/assets/icons/download-black.svg" width="18px" height="18px" alt="Download VS Code"
+					/> Windows
+					<small>Windows 10, 11</small>
+				</button>
+	
+				<table class="win-downloads">
+					<tbody>
+						<tr>
+							<td><strong>User Installer</strong></td>
+							<td><a class="dlink platform-link" data-os="win64user" id="download-alt-win64user" href="#" role="link" aria-label="Windows User install 64-bit x64">x64</a></td>
+							<td><a class="dlink platform-link" data-os="win32arm64user" id="download-alt-win32arm64user" href="#" role="link" aria-label="Windows User install Arm64">Arm64</a></td>
+						</tr>
+						<tr>
+							<td><strong>System Installer</strong></td>
+							<td><a class="dlink platform-link" data-os="win64" id="download-alt-win64" href="#" role="link" aria-label="Windows System install 64-bit x64">x64</a></td>
+							<td><a class="dlink platform-link" data-os="win32arm64setup" id="download-alt-win32arm64setup" href="#" role="link" aria-label="Windows System install Arm64">Arm64</a></td>
+						</tr>
+						<tr>
+							<td><strong>.zip</strong></td>
+							<td><a class="dlink platform-link" data-os="winzip" id="download-alt-winzip" href="#" role="link" aria-label="Windows ZIP 64-bit x64">x64</a></td>
+							<td><a class="dlink platform-link" data-os="win32arm64zip" id="download-alt-win32arm64zip" href="#" role="link" aria-label="Windows ZIP Arm64">Arm64</a></td>
+						</tr>
+						<tr class='cli-downloads'>
+							<td><strong>CLI</strong></td>
+							<td><a class="dlink platform-link" data-os="wincli" id="download-alt-wincli" href="#" role="link" aria-label="Windows CLI 64-bit x64">x64</a></td>
+							<td><a class="dlink platform-link" data-os="win32arm64cli" id="download-alt-win32arm64cli" href="#" role="link" aria-label="Windows CLI Arm64">Arm64</a></td>
+						</tr>
+					</tbody>
+				</table>
+	
+			</div>
+	
+			<div class="download">
+				<div class="logo linux"></div>
+				<button class="link-button dlink" data-os="linux64_deb" id="download-alt-main-linux64_deb" aria-label="Linux Debian Ubuntu download" role="link">
+					<img class="download-icon" src="/assets/icons/download.svg" width="18px" height="18px" alt="Download VS Code" />
+					<img class="download-icon-accessible" src="/assets/icons/download-black.svg" width="18px" height="18px" alt="Download VS Code"
+					/> .deb
+					<small>Debian, Ubuntu</small></button>
+				<button class="link-button dlink" data-os="linux64_rpm" id="download-alt-main-linux64_rpm" aria-label="Linux Red Hat Fedora SUSE download" role="link">
+					<img class="download-icon" src="/assets/icons/download.svg" width="18px" height="18px" alt="Download VS Code" />
+					<img class="download-icon-accessible" src="/assets/icons/download-black.svg" width="18px" height="18px" alt="Download VS Code"
+					/> .rpm
+					<small>Red Hat, Fedora, SUSE</small>
+				</button>
+	
+				<table class="linux-downloads">
+					<tbody>
+						<tr>
+							<td><strong>.deb</strong></td>
+							<td><a class="dlink platform-link" data-os="linux64_deb" id="download-alt-linux64_deb" href="#" role="link" aria-label="Linux Debian Ubuntu 64-bit x64 download">x64</a></td>
+							<td><a class="dlink platform-link" data-os="linuxarmhf_deb" id="download-alt-linuxarmhf_deb" href="#" role="link" aria-label="Linux Debian Ubuntu Arm 32-bit download">Arm32</a></td>
+							<td><a class="dlink platform-link" data-os="linuxarm64_deb" id="download-alt-linuxarm64_deb" href="#" role="link" aria-label="Linux Debian Ubuntu Arm 64-bit download">Arm64</a></td>
+						</tr>
+						<tr>
+							<td><strong>.rpm</strong></td>
+							<td><a class="dlink platform-link" data-os="linux64_rpm" id="download-alt-linux64_rpm" href="#" role="link" aria-label="Linux Red Hat Fedora SUSE 64-bit x64 download">x64</a></td>
+							<td><a class="dlink platform-link" data-os="linuxarmhf_rpm" id="download-alt-linuxarmhf_rpm" href="#" role="link" aria-label="Linux Red Hat Fedora SUSE Arm 32-bit download">Arm32</a></td>
+							<td><a class="dlink platform-link" data-os="linuxarm64_rpm" id="download-alt-linuxarm64_rpm" href="#" role="link" aria-label="Linux Red Hat Fedora SUSE Arm 64-bit download">Arm64</a></td>
+						</tr>
+						<tr>
+							<td><strong>.tar.gz</strong></td>
+							<td><a class="dlink platform-link" data-os="linux64" id="download-alt-linux64" href="#" role="link" aria-label="Linux .tar.gz 64-bit x64 download">x64</a></td>
+							<td><a class="dlink platform-link" data-os="linuxarmhf" id="download-alt-linuxarmhf" href="#" role="link" aria-label="Linux .tar.gz Arm 32-bit download">Arm32</a></td>
+							<td><a class="dlink platform-link" data-os="linuxarm64" id="download-alt-linuxarm64" href="#" role="link" aria-label="Linux .tar.gz Arm 64-bit download">Arm64</a></td>
+						</tr>
+						<tr>
+							<td><strong>Snap</strong></td>
+							<td class="snap-button" colspan="3">
+								<a class="dlink platform-link" href="https://snapcraft.io/code" target="_blank">Snap Store</a>
+							</td>
+						</tr>
+						<tr class='cli-downloads'>
+							<td><strong>CLI</strong></td>
+							<td><a class="dlink platform-link" data-os="linux64cli" id="download-alt-linux64cli" href="#" role="link" aria-label="Linux .tar.gz 64-bit x64 CLI download">x64</a></td>
+							<td><a class="dlink platform-link" data-os="linuxarmhfcli" id="download-alt-linuxarmhfcli" href="#" role="link" aria-label="Linux .tar.gz Arm 32-bit CLI download">Arm32</a></td>
+							<td><a class="dlink platform-link" data-os="linuxarm64cli" id="download-alt-linuxarm64cli" href="#" role="link" aria-label="Linux .tar.gz Arm 64-bit CLI download">Arm64</a></td>
+						</tr>
+					</tbody>
+				</table>
+	
+			</div>
+			<div class="download">
+				<div class="logo mac"></div>
+				<button class="link-button dlink" data-os="osx" id="download-alt-main-osx" aria-label="Mac Universal Build download" role="link">
+					<img class="download-icon" src="/assets/icons/download.svg" width="18px" height="18px" alt="Download VS Code" />
+					<img class="download-icon-accessible" src="/assets/icons/download-black.svg" width="18px" height="18px" alt="Download VS Code"
+					/> Mac
+					<small>macOS 12.0+</small>
+				</button>
+	
+					<table class="mac-downloads">
+					<tbody>
+						<tr>
+							<td><strong>.dmg</strong></td>
+							<td style="padding-left: 3px"><a class="dlink platform-link" data-os="darwinx64" id="download-alt-darwinx64" href="#" role="link" aria-label="Mac for Intel chip download link">Intel chip</a></td>
+							<td style="padding-left: 3px"><a class="dlink platform-link" data-os="darwinarm64" id="download-alt-darwinarm64" href="#" role="link" aria-label="Mac for Apple silicon download link">Apple silicon</a></td>
+							<td style="padding-left: 3px"><a class="dlink platform-link" data-os="osx" id="download-alt-osx" href="#" role="link" aria-label="Mac Universal Build download">Universal</a></td>
+						</tr>
+						<tr class='cli-downloads'>
+							<td><strong>CLI</strong></td>
+							<td style="padding-left: 3px"><a class="dlink platform-link" data-os="darwinx64cli" id="download-alt-darwinx64cli" href="#" role="link" aria-label="Mac CLI for Intel chip download link">Intel chip</a></td>
+							<td style="padding-left: 3px"><a class="dlink platform-link" data-os="darwinarm64cli" id="download-alt-darwinarm64cli" href="#" role="link" aria-label="Mac CLI for Apple silicon download link">Apple silicon</a></td>
+						</tr>
+					</tbody>
+				</table>
+			</div>
+		</div>
+	
+	</div>
+	
+	<div class="container alt-downloads">
+		<div class="row">
+			<p class="terms text-center">
+				By downloading and using Visual Studio Code, you agree to the <a href="/license">license terms</a> and <a href="https://go.microsoft.com/fwlink/?LinkId=521839">privacy
+					statement</a>.
+			</p>
+		</div>
+	</div>
+	<div class="alt-downloads swimlane-container insiders-callout">
+		<div class="swimlane">
+			<div class="container">
+				<div class="row">
+					<div class="col-md-6">
+						<div class="terms text-center">
+							<h2>Want new features sooner?</h2>
+							<p class="call-to-action">Get the <a href="/insiders" id="alt-downloads-insiders">Insiders build</a> instead.</p>
+						</div>
+					</div>
+					<div class="col-md-6">
+						<div class="terms text-center">
+							<h2>Use <a href="https://vscode.dev" id="alt-downloads-web" target="_blank">vscode.dev</a> for quick edits online!</h2>
+							<p class="call-to-action">GitHub, Azure Repos, and local files.</p>
+						</div>
+					</div>
+				</div>
+			</div>
+		</div>
+	</div>
+	<div class="text-center">
+		<p><a href="/docs/supporting/faq#_previous-release-versions" id="download-previous">Get previous versions</a></p>
+		<div class="sha-table-stable"></div>
+	</div>
+
+</div>
+		</main>
+	</div>
+
+	<div id="search-popup-overlay" class="search-popup-overlay" role="dialog" aria-modal="true" aria-label="Search">
+		<div class="search-popup-container">
+			<div class="search-popup-header">
+				<form class="search-popup-form">
+					<div class="input-group">
+						<input type="text" name="q" class="search-box form-control" placeholder="Search the website"
+							aria-label="Search text" role="combobox" aria-expanded="false"
+							aria-autocomplete="list" aria-controls="search-results-listbox"
+							aria-activedescendant="" />
+						<span class="input-group-btn">
+							<button tabindex="0" class="btn" type="submit" aria-label="Search">
+								<img class="search-icon-dark" src="/assets/icons/search-dark.svg" alt="Search" />
+								<img class="search-icon-light" src="/assets/icons/search.svg" alt="Search" />
+							</button>
+						</span>
+					</div>
+				</form>
+				<button class="search-popup-close" type="button" aria-label="Close search"><i class="codicon codicon-close" aria-hidden="true"></i></button>
+			</div>
+			<div class="search-popup-results">
+				<ul class="search-popup-results-list" id="search-results-listbox" role="listbox" aria-label="Search results"></ul>
+			</div>
+			<div class="sr-only" role="status" aria-live="polite" aria-atomic="true" id="search-popup-status"></div>
+		</div>
+	</div>
+
+
+	<footer role="contentinfo" class="container">
+		<div class="footer-container">
+			<div class="footer-row">
+				<div class="footer-social">
+					<ul class="links">
+						<li>
+							<a href="https://github.com/microsoft/vscode"><img src="/assets/icons/github-icon.svg" alt="VS Code on Github"></a>
+						</li>
+						<li>
+							<a href="https://go.microsoft.com/fwlink/?LinkID=533687"><img src="/assets/icons/x-icon.svg" class="x-icon" alt="Follow us on X"></a>
+						</li>
+						<li>
+							<a href="https://www.linkedin.com/showcase/vs-code"><img src="/assets/icons/linkedin-icon.svg" alt="VS Code on LinkedIn"></a>
+						</li>
+						<li>
+							<a href="https://bsky.app/profile/vscode.dev"><img src="/assets/icons/bluesky-icon.svg" alt="VS Code on Bluesky"></a>
+						</li>
+						<li>
+							<a href="https://www.reddit.com/r/vscode/"><img src="/assets/icons/reddit-icon.svg" alt="Join the VS Code community on Reddit"></a>
+						</li>
+						<li>
+							<a href="https://www.vscodepodcast.com"><img src="/assets/icons/podcast-icon.svg" alt="The VS Code Insiders Podcast"></a>
+						</li>
+						<li>
+							<a href="https://www.tiktok.com/@vscode"><img src="/assets/icons/tiktok-icon.svg" alt="VS Code on TikTok"></a>
+						</li>
+						<li>
+							<a href="https://www.youtube.com/@code"><img src="/assets/icons/youtube-icon.svg" alt="VS Code on YouTube"></a>
+						</li>
+						<script>
+							function manageConsent() {
+								if (siteConsent && siteConsent.isConsentRequired) {
+									siteConsent.manageConsent();
+								}
+							}
+						</script>
+					</ul>
+					<a id="footer-microsoft-link" class="microsoft-logo" href="https://www.microsoft.com">
+						<img src="/assets/icons/microsoft.svg" alt="Microsoft homepage" />
+					</a>
+				</div>
+			</div>
+			<div class="footer-row">
+				<ul class="links">
+					<li><a id="footer-support-link" href="https://support.serviceshub.microsoft.com/supportforbusiness/create?sapId=d66407ed-3967-b000-4cfb-2c318cad363d"
+						target="_blank" rel="noopener" title="Get support for VS Code"
+						aria-label="Get support for VS Code (opens in new tab)">Support</a></li>
+					<li><a id="footer-privacy-link" href="https://go.microsoft.com/fwlink/?LinkId=521839"
+						target="_blank" rel="noopener" title="View the Microsoft privacy statement"
+						aria-label="Microsoft privacy statement (opens in new tab)">Privacy</a></li>
+					<li style="display: none;"><a id="footer-cookie-link" style="cursor: pointer;" onclick="manageConsent()"
+						target="_blank" rel="noopener">Manage Cookies</a></li>
+					<li><a id="footer-terms-link" href="https://www.microsoft.com/legal/terms-of-use"
+						target="_blank" rel="noopener" title="View the Microsoft Terms of Use"
+						aria-label="Microsoft Terms of Use (opens in new tab)">Terms of Use</a></li>
+					<li><a id="footer-license-link" href="/License"
+						target="_blank" rel="noopener" title="View the Visual Studio Code license"
+						aria-label="Visual Studio Code license (opens in new tab)">License</a></li>
+				</ul>
+			</div>
+			<div class="footer-row">
+				<ul class="links">
+					<li>
+						<svg class="privacy-choices" role="img" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 30 14" xml:space="preserve" height="16" width="43">
+							<title>Your Privacy Choices Opt-Out Icon</title>
+							<path d="M7.4 12.8h6.8l3.1-11.6H7.4C4.2 1.2 1.6 3.8 1.6 7s2.6 5.8 5.8 5.8z" style="fill-rule:evenodd;clip-rule:evenodd;fill:#fff"></path>
+							<path d="M22.6 0H7.4c-3.9 0-7 3.1-7 7s3.1 7 7 7h15.2c3.9 0 7-3.1 7-7s-3.2-7-7-7zm-21 7c0-3.2 2.6-5.8 5.8-5.8h9.9l-3.1 11.6H7.4c-3.2 0-5.8-2.6-5.8-5.8z" style="fill-rule:evenodd;clip-rule:evenodd;fill:#06f"></path>
+							<path d="M24.6 4c.2.2.2.6 0 .8L22.5 7l2.2 2.2c.2.2.2.6 0 .8-.2.2-.6.2-.8 0l-2.2-2.2-2.2 2.2c-.2.2-.6.2-.8 0-.2-.2-.2-.6 0-.8L20.8 7l-2.2-2.2c-.2-.2-.2-.6 0-.8.2-.2.6-.2.8 0l2.2 2.2L23.8 4c.2-.2.6-.2.8 0z" style="fill:#fff"></path>
+							<path d="M12.7 4.1c.2.2.3.6.1.8L8.6 9.8c-.1.1-.2.2-.3.2-.2.1-.5.1-.7-.1L5.4 7.7c-.2-.2-.2-.6 0-.8.2-.2.6-.2.8 0L8 8.6l3.8-4.5c.2-.2.6-.2.9 0z" style="fill:#06f"></path>
+						</svg>
+						<a id="footer-privacy-choices-link" href="https://aka.ms/YourCaliforniaPrivacyChoices"
+						target="_blank" rel="noopener" title="View Your Privacy Choices"
+						aria-label="Your Privacy Choices (opens in new tab)">Your Privacy Choices</a></li>
+					<li><a id="footer-consumer-health-privacy-link" href="https://go.microsoft.com/fwlink/?linkid=2259814"
+						target="_blank" rel="noopener" title="View the Microsoft Consumer Health Privacy policy"
+						aria-label="Microsoft Consumer Health Privacy policy (opens in new tab)">Consumer Health Privacy</a></li>
+				</ul>
+			</div>
+		</div>
+	</footer>
+	<script type="module">
+		document.addEventListener('DOMContentLoaded', () => {
+			const copilotDeepLinks = document.querySelectorAll('.copilot-deep-link');
+			if (copilotDeepLinks.length === 0) {
+				return;
+			}
+			if (window.innerWidth < 992) {
+				for (const link of copilotDeepLinks) {
+					link.href = 'https://aka.ms/vscode-activatecopilotfree';
+				}
+			}
+		});
+	</script>
+
+	<script src="/dist/index.js"></script>
+
+	
+
+	<script type="application/ld+json">
+		{
+			"@context" : "http://schema.org",
+			"@type" : "SoftwareApplication",
+			"name" : "Visual Studio Code",
+			"softwareVersion": "1.119",
+			"offers": {
+				"@type": "Offer",
+				"price": "0",
+				"priceCurrency": "USD"
+			},
+			"applicationCategory": "DeveloperApplication",
+			"applicationSubCategory": "Text Editor",
+			"alternateName": "VS Code",
+			"datePublished": "2021-11-03",
+			"operatingSystem": "Mac, Linux, Windows",
+			"logo": "https://code.visualstudio.com/assets/apple-touch-icon.png",
+			"screenshot": "https://code.visualstudio.com/assets/images/product-screenshot.png",
+			"releaseNotes": "https://code.visualstudio.com/updates",
+			"downloadUrl": "https://code.visualstudio.com/download",
+			"license": "https://code.visualstudio.com/license",
+			"softwareRequirements": "https://code.visualstudio.com/docs/supporting/requirements",
+			"url" : "https://code.visualstudio.com",
+			"author": {
+				"@type": "Organization",
+				"name": "Microsoft"
+			},
+			"publisher": {
+				"@type": "Organization",
+				"name": "Microsoft"
+			},
+			"maintainer": {
+				"@type": "Organization",
+				"name": "Microsoft"
+			},
+			"potentialAction": {
+				"@type": "SearchAction",
+				"target": "https://code.visualstudio.com/Search?q={search_term_string}",
+				"query-input": "required name=search_term_string"
+			},
+			"sameAs" : [
+				"https://en.wikipedia.org/wiki/Visual_Studio_Code",
+				"https://twitter.com/code",
+				"https://www.youtube.com/code",
+				"https://www.tiktok.com/@vscode",
+				"https://github.com/microsoft/vscode"
+			]
+		}
+	</script>
+</body>
+
+</html>
