@@ -1,0 +1,82 @@
+{% extends "base.html" %}
+
+{% block title %}Issue User Certificate - SSH Certificate Admin{% endblock %}
+
+{% block content %}
+<h1 class="mb-4">Issue User Certificate</h1>
+
+<div class="row">
+    <div class="col-md-8">
+        <div class="card">
+            <div class="card-body">
+                <form method="POST">
+                    <div class="mb-3">
+                        <label for="user_id" class="form-label">SSH User <span class="text-danger">*</span></label>
+                        <select class="form-control form-select" id="user_id" name="user_id" required>
+                            <option value="">-- Select a user --</option>
+                            {% for user in users %}
+                            <option value="{{ user.id }}">
+                                {{ user.username }}
+                                {% if user.description %} - {{ user.description }}{% endif %}
+                            </option>
+                            {% endfor %}
+                        </select>
+                        {% if not users %}
+                        <small class="text-danger">No SSH users available. <a href="/users/add">Add one first</a></small>
+                        {% endif %}
+                    </div>
+                    
+                    <div class="mb-3">
+                        <label for="valid_days" class="form-label">Valid For (days)</label>
+                        <input type="number" class="form-control" id="valid_days" name="valid_days" 
+                               value="365" min="1" max="3650">
+                        <small class="form-text text-muted">How long the certificate should be valid (default: 365 days)</small>
+                    </div>
+                    
+                    <div class="mb-3">
+                        <label for="principals" class="form-label">Principals</label>
+                        <textarea class="form-control" id="principals" name="principals" rows="3" 
+                                  placeholder="Comma-separated list of principals (optional)&#10;e.g., john, john.doe, admin&#10;If empty, will use the username"></textarea>
+                        <small class="form-text text-muted">Linux usernames that can authenticate with this certificate</small>
+                    </div>
+                    
+                    <div class="alert alert-info" role="alert">
+                        <i class="bi bi-info-circle"></i> 
+                        <strong>Note:</strong> Ensure the CA key is properly configured on your system before issuing certificates.
+                    </div>
+                    
+                    <div class="d-flex gap-2">
+                        <button type="submit" class="btn btn-success" {% if not users %}disabled{% endif %}>
+                            <i class="bi bi-file-certificate"></i> Issue Certificate
+                        </button>
+                        <a href="/certificates" class="btn btn-secondary">Cancel</a>
+                    </div>
+                </form>
+            </div>
+        </div>
+    </div>
+    
+    <div class="col-md-4">
+        <div class="card">
+            <div class="card-header">
+                <h5 class="mb-0">About User Certificates</h5>
+            </div>
+            <div class="card-body">
+                <p><strong>What are they?</strong></p>
+                <p>SSH user certificates allow users to authenticate to any host that trusts the CA, without needing individual authorized_keys entries.</p>
+                
+                <p><strong>Benefits:</strong></p>
+                <ul class="small">
+                    <li>Centralized authentication</li>
+                    <li>Time-limited access</li>
+                    <li>Principals for role-based access</li>
+                    <li>Audit trail</li>
+                </ul>
+                
+                <p><strong>Usage:</strong></p>
+                <code class="d-block bg-light p-2 rounded text-break">ssh -i ~/.ssh/id_ed25519-cert.pub user@host</code>
+            </div>
+        </div>
+    </div>
+</div>
+{% endblock %}

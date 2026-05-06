@@ -1,0 +1,22 @@
+version: '3.8'
+
+services:
+  sshadmin:
+    build: .
+    container_name: sshadmin
+    ports:
+      - "5000:5000"
+    environment:
+      - FLASK_ENV=development
+      - SECRET_KEY=dev-secret-key-change-in-production
+      - DATABASE_URL=sqlite:///sshadmin.db
+    volumes:
+      - ./data:/app/instance
+      - /etc/ssh:/etc/ssh:ro  # Mount SSH directory for CA keys
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:5000/"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s

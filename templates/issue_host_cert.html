@@ -1,0 +1,76 @@
+{% extends "base.html" %}
+
+{% block title %}Issue Host Certificate - SSH Certificate Admin{% endblock %}
+
+{% block content %}
+<h1 class="mb-4">Issue Host Certificate</h1>
+
+<div class="row">
+    <div class="col-md-8">
+        <div class="card">
+            <div class="card-body">
+                <form method="POST">
+                    <div class="mb-3">
+                        <label for="host_id" class="form-label">SSH Host <span class="text-danger">*</span></label>
+                        <select class="form-control form-select" id="host_id" name="host_id" required>
+                            <option value="">-- Select a host --</option>
+                            {% for host in hosts %}
+                            <option value="{{ host.id }}">
+                                {{ host.hostname }}
+                                {% if host.description %} - {{ host.description }}{% endif %}
+                            </option>
+                            {% endfor %}
+                        </select>
+                        {% if not hosts %}
+                        <small class="text-danger">No hosts available. <a href="/hosts/add">Add one first</a></small>
+                        {% endif %}
+                    </div>
+                    
+                    <div class="mb-3">
+                        <label for="valid_days" class="form-label">Valid For (days)</label>
+                        <input type="number" class="form-control" id="valid_days" name="valid_days" 
+                               value="365" min="1" max="3650">
+                        <small class="form-text text-muted">How long the certificate should be valid (default: 365 days)</small>
+                    </div>
+                    
+                    <div class="alert alert-info" role="alert">
+                        <i class="bi bi-info-circle"></i> 
+                        <strong>Note:</strong> Ensure the CA key is properly configured on your system before issuing certificates.
+                    </div>
+                    
+                    <div class="d-flex gap-2">
+                        <button type="submit" class="btn btn-success" {% if not hosts %}disabled{% endif %}>
+                            <i class="bi bi-file-certificate"></i> Issue Certificate
+                        </button>
+                        <a href="/certificates" class="btn btn-secondary">Cancel</a>
+                    </div>
+                </form>
+            </div>
+        </div>
+    </div>
+    
+    <div class="col-md-4">
+        <div class="card">
+            <div class="card-header">
+                <h5 class="mb-0">About Host Certificates</h5>
+            </div>
+            <div class="card-body">
+                <p><strong>What are they?</strong></p>
+                <p>SSH host certificates verify that you're connecting to the right server, replacing TOFU (Trust On First Use).</p>
+                
+                <p><strong>Benefits:</strong></p>
+                <ul class="small">
+                    <li>MITM attack prevention</li>
+                    <li>No host key verification prompts</li>
+                    <li>Time-limited validity</li>
+                    <li>Centralized management</li>
+                </ul>
+                
+                <p><strong>Configuration:</strong></p>
+                <code class="d-block bg-light p-2 rounded text-break">@cert-authority * &lt;CA_PUB_KEY&gt;</code>
+                <p class="small mt-2">Add to ~/.ssh/known_hosts</p>
+            </div>
+        </div>
+    </div>
+</div>
+{% endblock %}

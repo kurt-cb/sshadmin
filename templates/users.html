@@ -1,0 +1,66 @@
+{% extends "base.html" %}
+
+{% block title %}SSH Users - SSH Certificate Admin{% endblock %}
+
+{% block content %}
+<div class="d-flex justify-content-between align-items-center mb-4">
+    <h1>SSH Users</h1>
+    <a href="/users/add" class="btn btn-primary">
+        <i class="bi bi-plus-circle"></i> Add User
+    </a>
+</div>
+
+<div class="card">
+    <div class="card-body">
+        {% if users %}
+        <div class="table-responsive">
+            <table class="table table-hover">
+                <thead>
+                    <tr>
+                        <th>Username</th>
+                        <th>Description</th>
+                        <th>Added By</th>
+                        <th>Created</th>
+                        <th>Actions</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    {% for user in users %}
+                    <tr>
+                        <td>
+                            <strong>{{ user.username }}</strong>
+                        </td>
+                        <td>
+                            {% if user.description %}
+                                {{ user.description[:50] }}{% if user.description|length > 50 %}...{% endif %}
+                            {% else %}
+                                <span class="text-muted">-</span>
+                            {% endif %}
+                        </td>
+                        <td>{{ user.creator.username }}</td>
+                        <td>{{ user.created_at.strftime('%Y-%m-%d') }}</td>
+                        <td>
+                            <div class="btn-group btn-group-sm" role="group">
+                                <a href="/certificates/issue/user?user_id={{ user.id }}" class="btn btn-info" title="Issue Certificate">
+                                    <i class="bi bi-file-earmark-check"></i>
+                                </a>
+                                <form method="POST" action="/users/{{ user.id }}/delete" style="display: inline;" onsubmit="return confirm('Delete this user?');">
+                                    <button type="submit" class="btn btn-danger" title="Delete">
+                                        <i class="bi bi-trash"></i>
+                                    </button>
+                                </form>
+                            </div>
+                        </td>
+                    </tr>
+                    {% endfor %}
+                </tbody>
+            </table>
+        </div>
+        {% else %}
+        <div class="alert alert-info" role="alert">
+            <i class="bi bi-info-circle"></i> No SSH users registered yet. <a href="/users/add">Add one now</a>
+        </div>
+        {% endif %}
+    </div>
+</div>
+{% endblock %}

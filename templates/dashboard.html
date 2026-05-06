@@ -1,0 +1,105 @@
+{% extends "base.html" %}
+
+{% block title %}Dashboard - SSH Certificate Admin{% endblock %}
+
+{% block content %}
+<div class="page-header mb-4">
+    <h1>Dashboard</h1>
+    <p class="text-muted">Welcome back, {{ current_user.username }}!</p>
+</div>
+
+<div class="row">
+    <div class="col-md-4">
+        <div class="stat-card">
+            <h3>{{ hosts_count }}</h3>
+            <p>Registered Hosts</p>
+        </div>
+    </div>
+    <div class="col-md-4">
+        <div class="stat-card" style="background: linear-gradient(135deg, #27ae60, #229954);">
+            <h3>{{ users_count }}</h3>
+            <p>SSH Users</p>
+        </div>
+    </div>
+    <div class="col-md-4">
+        <div class="stat-card" style="background: linear-gradient(135deg, #e74c3c, #c0392b);">
+            <h3>{{ certs_count }}</h3>
+            <p>Issued Certificates</p>
+        </div>
+    </div>
+</div>
+
+<div class="row mt-4">
+    <div class="col-md-8">
+        <div class="card">
+            <div class="card-header">
+                <h5 class="mb-0">Recent Certificates</h5>
+            </div>
+            <div class="card-body">
+                {% if recent_certs %}
+                <div class="table-responsive">
+                    <table class="table table-sm">
+                        <thead>
+                            <tr>
+                                <th>Type</th>
+                                <th>Subject</th>
+                                <th>Serial</th>
+                                <th>Valid Until</th>
+                                <th>Created</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            {% for cert in recent_certs %}
+                            <tr>
+                                <td>
+                                    {% if cert.cert_type == 'user' %}
+                                        <span class="badge bg-info"><i class="bi bi-person"></i> User</span>
+                                    {% else %}
+                                        <span class="badge bg-warning"><i class="bi bi-hdd-rack"></i> Host</span>
+                                    {% endif %}
+                                </td>
+                                <td>
+                                    {% if cert.user %}
+                                        {{ cert.user.username }}
+                                    {% elif cert.host %}
+                                        {{ cert.host.hostname }}
+                                    {% endif %}
+                                </td>
+                                <td><code>{{ cert.serial[:8] }}...</code></td>
+                                <td>{{ cert.valid_until.strftime('%Y-%m-%d') }}</td>
+                                <td><small class="text-muted">{{ cert.created_at.strftime('%Y-%m-%d %H:%M') }}</small></td>
+                            </tr>
+                            {% endfor %}
+                        </tbody>
+                    </table>
+                </div>
+                {% else %}
+                <p class="text-muted text-center py-3">No certificates issued yet</p>
+                {% endif %}
+            </div>
+        </div>
+    </div>
+    
+    <div class="col-md-4">
+        <div class="card">
+            <div class="card-header">
+                <h5 class="mb-0">Quick Actions</h5>
+            </div>
+            <div class="card-body">
+                <a href="/hosts/add" class="btn btn-outline-primary w-100 mb-2">
+                    <i class="bi bi-plus-circle"></i> Add Host
+                </a>
+                <a href="/users/add" class="btn btn-outline-success w-100 mb-2">
+                    <i class="bi bi-plus-circle"></i> Add SSH User
+                </a>
+                <a href="/certificates/issue/user" class="btn btn-outline-info w-100 mb-2">
+                    <i class="bi bi-file-certificate"></i> Issue User Cert
+                </a>
+                <a href="/certificates/issue/host" class="btn btn-outline-warning w-100">
+                    <i class="bi bi-file-certificate"></i> Issue Host Cert
+                </a>
+            </div>
+        </div>
+    </div>
+</div>
+{% endblock %}
