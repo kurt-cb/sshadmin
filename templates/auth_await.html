@@ -1,0 +1,119 @@
+{% extends "base.html" %}
+
+{% block title %}{% if purpose == 'register' %}Complete Registration{% else %}Complete Login{% endif %} - SSH Certificate Admin{% endblock %}
+
+{% block extra_css %}
+<style>
+  pre.cmd {
+    background-color: #1e1e1e;
+    color: #d4d4d4;
+    padding: 1rem;
+    border-radius: 6px;
+    font-size: 0.85rem;
+    line-height: 1.4;
+    overflow: auto;
+  }
+  .copy-wrap { position: relative; }
+  .copy-btn { position: absolute; top: 0.5rem; right: 0.5rem; }
+  .status-pending  { color: #b58900; }
+  .status-complete { color: #2aa198; }
+  .status-expired  { color: #dc3545; }
+</style>
+{% endblock %}
+
+{% block content %}
+<h1 class="mb-3">
+  {% if purpose == 'register' %}Complete Registration for {{ username }}{% else %}Complete Login for {{ username }}{% endif %}
+</h1>
+
+<div class="alert alert-info">
+  <strong>Run this on a machine that holds your SSH private key</strong>
+  (the private half of the public key you registered).
+  {% if purpose == 'register' %}
+    Run with <code>sudo</code> if you also want this host enrolled with sshadmin.
+    Run without <code>sudo</code> to register the user only.
+  {% endif %}
+  Challenge expires {{ challenge.expires_at.strftime('%Y-%m-%d %H:%M UTC') }}.
+</div>
+
+<div class="card mb-3">
+  <div class="card-header">One-liner</div>
+  <div class="card-body copy-wrap">
+    <button class="btn btn-sm btn-secondary copy-btn" id="copy-oneliner" type="button">
+      <i class="bi bi-clipboard"></i> Copy
+    </button>
+    <pre class="cmd m-0" id="oneliner">{{ one_liner }}</pre>
+  </div>
+</div>
+
+<div class="card mb-3">
+  <div class="card-header">Status</div>
+  <div class="card-body">
+    <h4 id="status-text" class="status-pending">
+      <i class="bi bi-hourglass-split"></i> Waiting for signed response...
+    </h4>
+    <p class="text-muted small mb-0" id="status-detail">
+      This page polls every 3 seconds. When the challenge response is verified
+      you'll be logged in automatically.
+    </p>
+    <div id="host-status" class="mt-2 small"></div>
+  </div>
+</div>
+
+<a href="{{ url_for('login') }}" class="btn btn-secondary btn-sm">Cancel</a>
+{% endblock %}
+
+{% block extra_js %}
+<script>
+  (function() {
+    var btn = document.getElementById('copy-oneliner');
+    btn.addEventListener('click', function() {
+      navigator.clipboard.writeText(document.getElementById('oneliner').innerText).then(function() {
+        var orig = btn.innerHTML;
+        btn.innerHTML = '<i class="bi bi-check2"></i> Copied';
+        setTimeout(function() { btn.innerHTML = orig; }, 1500);
+      });
+    });
+
+    var statusEl = document.getElementById('status-text');
+    var detailEl = document.getElementById('status-detail');
+    var hostEl   = document.getElementById('host-status');
+    var token    = {{ challenge.token|tojson }};
+
+    function setStatus(cls, html) {
+      statusEl.className = cls;
+      statusEl.innerHTML = html;
+    }
+
+    function poll() {
+      fetch('/api/auth_status/' + encodeURIComponent(token), { credentials: 'same-origin' })
+        .then(function(r) { return r.json(); })
+        .then(function(data) {
+          if (data.status === 'completed') {
+            setStatus('status-complete', '<i class="bi bi-check-circle"></i> Verified — redirecting...');
+            detailEl.textContent = '';
+            setTimeout(function() { window.location = data.redirect; }, 800);
+            return;
+          }
+          if (data.status === 'expired') {
+            setStatus('status-expired', '<i class="bi bi-x-circle"></i> Challenge expired.');
+            detailEl.textContent = 'Start over from the registration or login page.';
+            return;
+          }
+          if (data.status === 'unknown') {
+            setStatus('status-expired', '<i class="bi bi-x-circle"></i> Unknown challenge.');
+            return;
+          }
+          if (data.status === 'completed_other_session') {
+            setStatus('status-expired', '<i class="bi bi-x-circle"></i> Verified from a different browser session.');
+            detailEl.textContent = 'Open this page from the same browser that started the flow.';
+            return;
+          }
+          setTimeout(poll, 3000);
+        })
+        .catch(function() { setTimeout(poll, 5000); });
+    }
+    poll();
+  })();
+</script>
+{% endblock %}
