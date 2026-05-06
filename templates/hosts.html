@@ -29,7 +29,13 @@
                     {% for host in hosts %}
                     <tr>
                         <td>
-                            <strong>{{ host.hostname }}</strong>
+                            <strong>
+                                {% if host.is_enrolled %}
+                                    <a href="{{ url_for('host_info', host_id=host.id) }}">{{ host.hostname }}</a>
+                                {% else %}
+                                    {{ host.hostname }}
+                                {% endif %}
+                            </strong>
                         </td>
                         <td>
                             {% if host.is_enrolled %}

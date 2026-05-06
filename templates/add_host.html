@@ -5,6 +5,15 @@
 {% block content %}
 <h1 class="mb-4">Add New Host</h1>
 
+<hr/>
+<p>
+ SSH signed host keys (also known as SSH Host Certificates) allow a client to verify a server's identity through
+ a Trusted Certificate Authority (CA) rather than relying on the "Trust On First Use" (TOFU) model.
+ This eliminates the common "The authenticity of host... can't be established" warning and protects
+ against Man-In-The-Middle (MITM) attacks in dynamic environments.
+</p>
+<hr/>
+
 <div class="row">
     <div class="col-md-8">
         <div class="card">

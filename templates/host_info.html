@@ -1,0 +1,95 @@
+{% extends "base.html" %}
+
+{% block title %}{{ host.hostname }} - SSH Certificate Admin{% endblock %}
+
+{% block content %}
+<div class="d-flex justify-content-between align-items-center mb-3">
+  <h1 class="m-0">{{ host.hostname }}</h1>
+  <span class="badge bg-success">Enrolled</span>
+</div>
+
+<div class="card mb-3">
+  <div class="card-header">Registration</div>
+  <div class="card-body">
+    <dl class="row mb-0">
+      <dt class="col-sm-3">Hostname</dt>
+      <dd class="col-sm-9"><code>{{ host.hostname }}</code></dd>
+
+      <dt class="col-sm-3">Description</dt>
+      <dd class="col-sm-9">{{ host.description or '-' }}</dd>
+
+      <dt class="col-sm-3">Added By</dt>
+      <dd class="col-sm-9">{{ host.creator.username }}</dd>
+
+      <dt class="col-sm-3">Added</dt>
+      <dd class="col-sm-9">{{ host.created_at.strftime('%Y-%m-%d %H:%M UTC') }}</dd>
+
+      <dt class="col-sm-3">Enrolled</dt>
+      <dd class="col-sm-9">{{ host.enrolled_at.strftime('%Y-%m-%d %H:%M UTC') }}</dd>
+
+      <dt class="col-sm-3">Key Type</dt>
+      <dd class="col-sm-9"><code>{{ key_type or 'unknown' }}</code></dd>
+
+      {% if fingerprint %}
+      <dt class="col-sm-3">Fingerprint</dt>
+      <dd class="col-sm-9"><code>{{ fingerprint }}</code></dd>
+      {% endif %}
+
+      <dt class="col-sm-3">Public Key</dt>
+      <dd class="col-sm-9">
+        <pre class="bg-light p-2 rounded text-break" style="white-space: pre-wrap;">{{ host.public_key }}</pre>
+      </dd>
+    </dl>
+  </div>
+</div>
+
+<div class="card mb-3">
+  <div class="card-header">Active Certificates</div>
+  <div class="card-body">
+    {% if active_certs %}
+    <table class="table table-sm mb-0">
+      <thead>
+        <tr><th>Serial</th><th>Issued</th><th>Valid Until</th><th></th></tr>
+      </thead>
+      <tbody>
+        {% for cert in active_certs %}
+        <tr>
+          <td><code>{{ cert.serial }}</code></td>
+          <td>{{ cert.created_at.strftime('%Y-%m-%d') }}</td>
+          <td>{{ cert.valid_until.strftime('%Y-%m-%d') }}</td>
+          <td><a href="{{ url_for('download_cert', cert_id=cert.id) }}" class="btn btn-sm btn-outline-primary">Download</a></td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+    {% else %}
+    <p class="text-muted m-0">No active certificates. <a href="{{ url_for('issue_host_cert') }}?host_id={{ host.id }}">Issue one now</a>.</p>
+    {% endif %}
+  </div>
+</div>
+
+<div class="card">
+  <div class="card-header">Manage Registration</div>
+  <div class="card-body d-flex flex-wrap gap-2">
+    <a href="{{ url_for('issue_host_cert') }}?host_id={{ host.id }}" class="btn btn-primary">
+      <i class="bi bi-file-earmark-check"></i> Issue Certificate
+    </a>
+
+    <form method="POST" action="{{ url_for('re_register_host', host_id=host.id) }}"
+          onsubmit="return confirm('This invalidates the current registration and issues a new one-time enrollment token. The host will need to run the new script. Continue?');">
+      <button type="submit" class="btn btn-warning">
+        <i class="bi bi-arrow-repeat"></i> Re-register Host
+      </button>
+    </form>
+
+    <form method="POST" action="{{ url_for('delete_host', host_id=host.id) }}"
+          onsubmit="return confirm('Delete this host and all its certificates?');">
+      <button type="submit" class="btn btn-danger">
+        <i class="bi bi-trash"></i> Delete Registration
+      </button>
+    </form>
+
+    <a href="{{ url_for('hosts') }}" class="btn btn-secondary ms-auto">Back to Hosts</a>
+  </div>
+</div>
+{% endblock %}

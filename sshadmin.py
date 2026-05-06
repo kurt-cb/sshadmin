@@ -306,9 +306,18 @@ def add_host():
             flash('Hostname is required', 'danger')
             return redirect(url_for('add_host'))
 
-        if Host.query.filter_by(hostname=hostname).first():
-            flash('Host already exists', 'danger')
-            return redirect(url_for('add_host'))
+        existing = Host.query.filter_by(hostname=hostname).first()
+        if existing:
+            if existing.is_enrolled:
+                flash(f'Host {hostname} is already enrolled. Re-register or delete it from here.', 'info')
+                return redirect(url_for('host_info', host_id=existing.id))
+            # Pending host — refresh metadata, reissue token, and resume enrollment.
+            if description:
+                existing.description = description
+            existing.issue_enrollment_token()
+            db.session.commit()
+            flash(f'Host {hostname} already had a pending enrollment; a new token was issued.', 'info')
+            return redirect(url_for('enroll_host', host_id=existing.id))
 
         host = Host(
             hostname=hostname,
@@ -322,6 +331,56 @@ def add_host():
         return redirect(url_for('enroll_host', host_id=host.id))
 
     return render_template('add_host.html')
+
+
+@app.route('/hosts/<int:host_id>')
+@login_required
+def host_info(host_id):
+    """Show registration details for an enrolled host."""
+    host = Host.query.get_or_404(host_id)
+    if not host.is_enrolled:
+        return redirect(url_for('enroll_host', host_id=host.id))
+
+    fingerprint = None
+    key_type = None
+    if host.public_key:
+        parts = host.public_key.split()
+        if parts:
+            key_type = parts[0]
+        try:
+            with tempfile.NamedTemporaryFile(mode='w', delete=False, suffix='.pub') as f:
+                f.write(host.public_key)
+                tmp = f.name
+            try:
+                result = subprocess.run(
+                    ['ssh-keygen', '-l', '-f', tmp],
+                    capture_output=True, text=True, check=True,
+                )
+                fingerprint = result.stdout.strip()
+            finally:
+                os.unlink(tmp)
+        except Exception:
+            fingerprint = None
+
+    active_certs = [c for c in host.certificates if c.valid_until > datetime.utcnow()]
+    return render_template(
+        'host_info.html',
+        host=host,
+        fingerprint=fingerprint,
+        key_type=key_type,
+        active_certs=active_certs,
+    )
+
+
+@app.route('/hosts/<int:host_id>/re-register', methods=['POST'])
+@login_required
+def re_register_host(host_id):
+    """Invalidate an enrolled host's registration and issue a fresh enrollment token."""
+    host = Host.query.get_or_404(host_id)
+    host.issue_enrollment_token()
+    db.session.commit()
+    flash(f'Host {host.hostname} registration cleared. Run the new script on the host to re-enroll.', 'warning')
+    return redirect(url_for('enroll_host', host_id=host.id))
 
 
 @app.route('/hosts/<int:host_id>/enroll')
@@ -347,11 +406,17 @@ def enroll_host(host_id):
         hostname=host.hostname,
         key_type=ALLOWED_HOST_KEY_TYPE,
     )
+    one_liner_url = (
+        f"{server_url}{url_for('api_enroll_script')}"
+        f"?token={host.enrollment_token}&host_id={host.id}"
+    )
+    one_liner = f'curl -fsSL "{one_liner_url}" | sudo bash'
 
     return render_template(
         'enroll_host.html',
         host=host,
         script=script,
+        one_liner=one_liner,
         expires_at=host.enrollment_expires_at,
     )
 
@@ -591,6 +656,47 @@ def api_ca_status():
     """Check CA key status"""
     has_ca = cert_gen.check_ca_keys()
     return jsonify({'ca_available': has_ca})
+
+
+@app.route('/api/enroll/script')
+def api_enroll_script():
+    """Public token-authenticated endpoint that returns the enrollment script.
+
+    Designed so the host operator can run the bundled one-liner:
+        curl -fsSL "<url>/api/enroll/script?token=...&host_id=..." | sudo bash
+    """
+    token = (request.args.get('token') or '').strip()
+    host_id_raw = (request.args.get('host_id') or '').strip()
+
+    if not token:
+        return ('# enrollment token required\n', 403, {'Content-Type': 'text/plain'})
+
+    host = Host.query.filter_by(enrollment_token=token).first()
+    if not host:
+        return ('# invalid enrollment token\n', 403, {'Content-Type': 'text/plain'})
+
+    if host_id_raw:
+        try:
+            if int(host_id_raw) != host.id:
+                return ('# token/host_id mismatch\n', 403, {'Content-Type': 'text/plain'})
+        except ValueError:
+            return ('# invalid host_id\n', 400, {'Content-Type': 'text/plain'})
+
+    if host.enrolled_at is not None:
+        return ('# token already used\n', 409, {'Content-Type': 'text/plain'})
+
+    if host.enrollment_expires_at is None or host.enrollment_expires_at < datetime.utcnow():
+        return ('# token expired\n', 403, {'Content-Type': 'text/plain'})
+
+    server_url = request.url_root.rstrip('/')
+    script = render_template(
+        'enrollment_script.sh',
+        server_url=server_url,
+        token=host.enrollment_token,
+        hostname=host.hostname,
+        key_type=ALLOWED_HOST_KEY_TYPE,
+    )
+    return (script, 200, {'Content-Type': 'text/x-shellscript; charset=utf-8'})
 
 
 @app.route('/api/ca-pubkey')

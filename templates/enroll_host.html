@@ -37,7 +37,24 @@
 
 <div class="card mb-3">
   <div class="card-header d-flex justify-content-between align-items-center">
-    <span>Copy &amp; paste into a root shell on the target host</span>
+    <span>Option 1: One-liner (fetch &amp; execute)</span>
+  </div>
+  <div class="card-body copy-btn-wrap">
+    <button class="btn btn-sm btn-secondary copy-btn" type="button" id="copy-oneliner-btn">
+      <i class="bi bi-clipboard"></i> Copy
+    </button>
+    <pre class="enrollment-script m-0" id="enrollment-oneliner">{{ one_liner }}</pre>
+    <p class="small text-muted mt-2 mb-0">
+      Runs as root on the target host. Downloads the script using the one-time token
+      and pipes it to <code>bash</code>. The token is validated server-side before the
+      script is returned.
+    </p>
+  </div>
+</div>
+
+<div class="card mb-3">
+  <div class="card-header d-flex justify-content-between align-items-center">
+    <span>Option 2: Copy &amp; paste the full script into a root shell</span>
     <a class="btn btn-sm btn-outline-light" href="{{ url_for('enroll_host_script', host_id=host.id) }}">
       <i class="bi bi-download"></i> Download .sh
     </a>
@@ -82,14 +99,19 @@
 
 {% block extra_js %}
 <script>
-  document.getElementById('copy-script-btn').addEventListener('click', function() {
-    var pre = document.getElementById('enrollment-script');
-    navigator.clipboard.writeText(pre.innerText).then(function() {
-      var btn = document.getElementById('copy-script-btn');
-      var orig = btn.innerHTML;
-      btn.innerHTML = '<i class="bi bi-check2"></i> Copied';
-      setTimeout(function() { btn.innerHTML = orig; }, 1500);
+  function wireCopy(btnId, srcId) {
+    var btn = document.getElementById(btnId);
+    if (!btn) return;
+    btn.addEventListener('click', function() {
+      var src = document.getElementById(srcId);
+      navigator.clipboard.writeText(src.innerText).then(function() {
+        var orig = btn.innerHTML;
+        btn.innerHTML = '<i class="bi bi-check2"></i> Copied';
+        setTimeout(function() { btn.innerHTML = orig; }, 1500);
+      });
     });
-  });
+  }
+  wireCopy('copy-script-btn', 'enrollment-script');
+  wireCopy('copy-oneliner-btn', 'enrollment-oneliner');
 </script>
 {% endblock %}
