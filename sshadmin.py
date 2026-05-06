@@ -1,10 +1,9 @@
 """
 SSH Certificate Admin - Web-based SSH certificate management system
 """
-from flask import Flask, render_template, request, jsonify, redirect, url_for, flash
+from flask import Flask, render_template, request, jsonify, redirect, url_for, flash, session, Response
 from flask_sqlalchemy import SQLAlchemy
 from flask_login import LoginManager, UserMixin, login_user, logout_user, login_required, current_user
-from werkzeug.security import generate_password_hash, check_password_hash
 from datetime import datetime, timedelta
 import os
 import json
@@ -14,7 +13,10 @@ import subprocess
 import tempfile
 
 ALLOWED_HOST_KEY_TYPE = 'ecdsa-sha2-nistp521'
+ALLOWED_USER_KEY_TYPES = ('ecdsa-sha2-nistp521', 'ssh-ed25519', 'ecdsa-sha2-nistp384')
 ENROLLMENT_TOKEN_TTL_HOURS = 24
+CHALLENGE_TTL_MINUTES = 30
+SSHSIG_NAMESPACE = 'sshadmin'
 
 app = Flask(__name__)
 app.config['SECRET_KEY'] = os.environ.get('SECRET_KEY', 'dev-secret-key-change-in-production')
@@ -29,19 +31,36 @@ login_manager.login_view = 'login'
 # ==================== Database Models ====================
 
 class User(UserMixin, db.Model):
-    """Application user model"""
+    """Application user model — auth via SSH-key challenge/response (no password)."""
     id = db.Column(db.Integer, primary_key=True)
     username = db.Column(db.String(80), unique=True, nullable=False)
-    password_hash = db.Column(db.String(255), nullable=False)
-    email = db.Column(db.String(120), unique=True, nullable=False)
+    public_key = db.Column(db.Text, nullable=False)
     is_admin = db.Column(db.Boolean, default=False)
     created_at = db.Column(db.DateTime, default=datetime.utcnow)
+    completed_at = db.Column(db.DateTime, nullable=True)
 
-    def set_password(self, password):
-        self.password_hash = generate_password_hash(password)
-    
-    def check_password(self, password):
-        return check_password_hash(self.password_hash, password)
+    @property
+    def is_active(self):
+        # Flask-Login refuses to log in users where is_active is False.
+        return self.completed_at is not None
+
+
+class Challenge(db.Model):
+    """One-time SSHSIG challenge for register-or-login flows."""
+    id = db.Column(db.Integer, primary_key=True)
+    token = db.Column(db.String(64), unique=True, nullable=False, index=True)
+    nonce = db.Column(db.String(128), nullable=False)
+    purpose = db.Column(db.String(20), nullable=False)  # 'register' or 'login'
+    user_id = db.Column(db.Integer, db.ForeignKey('user.id'), nullable=False)
+    created_at = db.Column(db.DateTime, default=datetime.utcnow)
+    expires_at = db.Column(db.DateTime, nullable=False)
+    consumed_at = db.Column(db.DateTime, nullable=True)
+
+    user = db.relationship('User', backref='challenges')
+
+    @property
+    def is_active(self):
+        return self.consumed_at is None and self.expires_at > datetime.utcnow()
 
 
 class Host(db.Model):
@@ -108,7 +127,56 @@ class Certificate(db.Model):
 
 @login_manager.user_loader
 def load_user(user_id):
-    return User.query.get(int(user_id))
+    user = User.query.get(int(user_id))
+    if user is None or user.completed_at is None:
+        return None
+    return user
+
+
+def verify_sshsig(public_key, signature_armor, message, identity='user', namespace=SSHSIG_NAMESPACE):
+    """Verify an SSHSIG-format signature using `ssh-keygen -Y verify`.
+
+    Returns True on success, False otherwise.
+    """
+    parts = (public_key or '').strip().split()
+    if len(parts) < 2:
+        return False
+    clean_pubkey = parts[0] + ' ' + parts[1]
+
+    with tempfile.TemporaryDirectory() as tmp:
+        allowed_signers = os.path.join(tmp, 'allowed_signers')
+        sig_path = os.path.join(tmp, 'message.sig')
+        with open(allowed_signers, 'w') as f:
+            f.write(f'{identity} {clean_pubkey}\n')
+        with open(sig_path, 'w') as f:
+            f.write(signature_armor)
+        try:
+            result = subprocess.run(
+                ['ssh-keygen', '-Y', 'verify',
+                 '-f', allowed_signers,
+                 '-I', identity,
+                 '-n', namespace,
+                 '-s', sig_path],
+                input=message,
+                capture_output=True, text=True,
+                timeout=10,
+            )
+        except Exception:
+            return False
+        return result.returncode == 0
+
+
+def _new_challenge(user, purpose):
+    """Create + persist a fresh Challenge for a user; caller must commit."""
+    challenge = Challenge(
+        token=secrets.token_urlsafe(32),
+        nonce=secrets.token_hex(32),
+        purpose=purpose,
+        user_id=user.id,
+        expires_at=datetime.utcnow() + timedelta(minutes=CHALLENGE_TTL_MINUTES),
+    )
+    db.session.add(challenge)
+    return challenge
 
 
 from functools import wraps
@@ -251,7 +319,10 @@ cert_gen = SSHCertificateGenerator()
 # Endpoints that must remain reachable even when CA is missing.
 _CA_SETUP_ALLOWED_ENDPOINTS = {
     'login', 'logout', 'register', 'setup_ca', 'static',
+    'auth_await',
     'api_ca_status', 'api_ca_pubkey',
+    'api_auth_script', 'api_auth_status', 'api_challenge_response',
+    'api_enroll_script', 'api_enroll_host',
 }
 
 
@@ -352,60 +423,90 @@ def server_config():
 
 @app.route('/register', methods=['GET', 'POST'])
 def register():
-    """User registration"""
+    """User registration via SSH key challenge-response."""
     if request.method == 'POST':
-        username = request.form.get('username')
-        email = request.form.get('email')
-        password = request.form.get('password')
-        confirm = request.form.get('confirm')
-        
-        if not username or not email or not password:
-            flash('Missing required fields', 'danger')
-            return redirect(url_for('register'))
-        
-        if password != confirm:
-            flash('Passwords do not match', 'danger')
-            return redirect(url_for('register'))
-        
-        if User.query.filter_by(username=username).first():
-            flash('Username already exists', 'danger')
+        username = (request.form.get('username') or '').strip()
+        public_key = (request.form.get('public_key') or '').strip()
+
+        if not username or not public_key:
+            flash('Username and SSH public key are required.', 'danger')
             return redirect(url_for('register'))
 
-        if User.query.filter_by(email=email).first():
-            flash('Email already registered', 'danger')
+        parts = public_key.split()
+        if len(parts) < 2 or parts[0] not in ALLOWED_USER_KEY_TYPES:
+            flash(
+                f'Public key must be one of: {", ".join(ALLOWED_USER_KEY_TYPES)}.',
+                'danger',
+            )
             return redirect(url_for('register'))
 
-        is_first_user = User.query.count() == 0
-        user = User(username=username, email=email, is_admin=is_first_user)
-        user.set_password(password)
-        db.session.add(user)
+        existing = User.query.filter_by(username=username).first()
+        if existing and existing.completed_at is not None:
+            flash('Username already registered.', 'danger')
+            return redirect(url_for('register'))
+
+        if existing and existing.completed_at is None:
+            # Reuse pending row (refresh public_key) so abandoned attempts can resume.
+            existing.public_key = public_key
+            user = existing
+        else:
+            user = User(username=username, public_key=public_key)
+            db.session.add(user)
+            db.session.flush()  # populate user.id for the Challenge FK
+
+        challenge = _new_challenge(user, 'register')
         db.session.commit()
 
-        if is_first_user:
-            flash('Registration successful! As the first user you have admin rights. Please log in.', 'success')
-        else:
-            flash('Registration successful! Please log in.', 'success')
-        return redirect(url_for('login'))
-    
-    return render_template('register.html')
+        session['pending_challenge_token'] = challenge.token
+        return redirect(url_for('auth_await', token=challenge.token))
+
+    return render_template('register.html', allowed_key_types=ALLOWED_USER_KEY_TYPES)
 
 
 @app.route('/login', methods=['GET', 'POST'])
 def login():
-    """User login"""
+    """Login via SSH key challenge-response."""
     if request.method == 'POST':
-        username = request.form.get('username')
-        password = request.form.get('password')
-        
+        username = (request.form.get('username') or '').strip()
+        if not username:
+            flash('Username is required.', 'danger')
+            return redirect(url_for('login'))
+
         user = User.query.filter_by(username=username).first()
-        
-        if user and user.check_password(password):
-            login_user(user)
-            return redirect(url_for('dashboard'))
-        
-        flash('Invalid username or password', 'danger')
-    
+        if not user or user.completed_at is None:
+            # Same response whether the user exists or not (avoid enumeration).
+            flash('No completed registration for that username.', 'danger')
+            return redirect(url_for('login'))
+
+        challenge = _new_challenge(user, 'login')
+        db.session.commit()
+
+        session['pending_challenge_token'] = challenge.token
+        return redirect(url_for('auth_await', token=challenge.token))
+
     return render_template('login.html')
+
+
+@app.route('/auth/await/<token>')
+def auth_await(token):
+    """Page that displays the curl one-liner and polls for completion."""
+    challenge = Challenge.query.filter_by(token=token).first_or_404()
+
+    server_url = request.url_root.rstrip('/')
+    one_liner_url = f"{server_url}{url_for('api_auth_script')}?token={challenge.token}"
+    if challenge.purpose == 'register':
+        one_liner = f'curl -fsSL "{one_liner_url}" | sudo bash   # omit sudo to skip host enrollment'
+    else:
+        one_liner = f'curl -fsSL "{one_liner_url}" | bash'
+
+    return render_template(
+        'auth_await.html',
+        challenge=challenge,
+        one_liner=one_liner,
+        one_liner_url=one_liner_url,
+        purpose=challenge.purpose,
+        username=challenge.user.username,
+    )
 
 
 @app.route('/logout')
@@ -804,6 +905,149 @@ def api_ca_status():
     """Check CA key status"""
     has_ca = cert_gen.check_ca_keys()
     return jsonify({'ca_available': has_ca})
+
+
+# ==================== Auth (challenge/response) API ====================
+
+@app.route('/api/auth/script')
+def api_auth_script():
+    """Public endpoint: returns the bash sign-and-submit script for an active challenge."""
+    token = (request.args.get('token') or '').strip()
+    if not token:
+        return ('# token query parameter required\n', 400, {'Content-Type': 'text/plain'})
+
+    challenge = Challenge.query.filter_by(token=token).first()
+    if not challenge:
+        return ('# unknown challenge token\n', 404, {'Content-Type': 'text/plain'})
+    if challenge.consumed_at is not None:
+        return ('# challenge already consumed\n', 409, {'Content-Type': 'text/plain'})
+    if challenge.expires_at < datetime.utcnow():
+        return ('# challenge expired\n', 410, {'Content-Type': 'text/plain'})
+
+    server_url = request.url_root.rstrip('/')
+    script = render_template(
+        'auth_script.sh',
+        server_url=server_url,
+        token=challenge.token,
+        nonce=challenge.nonce,
+        username=challenge.user.username,
+        purpose=challenge.purpose,
+        public_key=challenge.user.public_key,
+        sshsig_namespace=SSHSIG_NAMESPACE,
+        host_key_type=ALLOWED_HOST_KEY_TYPE,
+        include_host_enrollment=(challenge.purpose == 'register'),
+    )
+    return (script, 200, {'Content-Type': 'text/x-shellscript; charset=utf-8'})
+
+
+@app.route('/api/challenge_response', methods=['POST'])
+def api_challenge_response():
+    """Accept a signature for an active challenge; optionally enroll host."""
+    payload = request.get_json(silent=True) or request.form
+    token = (payload.get('token') or '').strip()
+    signature = (payload.get('signature') or '')
+    hostname = (payload.get('hostname') or '').strip() or None
+    host_pubkey = (payload.get('host_public_key') or '').strip() or None
+
+    if not token or not signature:
+        return jsonify({'ok': False, 'error': 'token and signature required'}), 400
+
+    challenge = Challenge.query.filter_by(token=token).first()
+    if not challenge:
+        return jsonify({'ok': False, 'error': 'invalid token'}), 404
+    if challenge.consumed_at is not None:
+        return jsonify({'ok': False, 'error': 'challenge already used'}), 409
+    if challenge.expires_at < datetime.utcnow():
+        return jsonify({'ok': False, 'error': 'challenge expired'}), 410
+
+    if not verify_sshsig(challenge.user.public_key, signature, challenge.nonce):
+        return jsonify({'ok': False, 'error': 'signature verification failed'}), 403
+
+    challenge.consumed_at = datetime.utcnow()
+
+    if challenge.purpose == 'register':
+        if challenge.user.completed_at is None:
+            # Promote first completed user to admin.
+            existing_admin = (
+                User.query
+                .filter(User.completed_at.isnot(None), User.is_admin == True)  # noqa: E712
+                .first()
+            )
+            if existing_admin is None:
+                challenge.user.is_admin = True
+            challenge.user.completed_at = datetime.utcnow()
+
+    host_result = {'enrolled': False}
+    if hostname and host_pubkey:
+        host_result = _try_enroll_host_during_register(
+            user=challenge.user,
+            hostname=hostname,
+            host_pubkey=host_pubkey,
+        )
+
+    db.session.commit()
+
+    return jsonify({
+        'ok': True,
+        'purpose': challenge.purpose,
+        'username': challenge.user.username,
+        'host': host_result,
+    })
+
+
+def _try_enroll_host_during_register(user, hostname, host_pubkey):
+    """Best-effort host enrollment as part of registration. Returns a status dict."""
+    if not host_pubkey.startswith(ALLOWED_HOST_KEY_TYPE + ' '):
+        return {'enrolled': False, 'reason': f'host key must be {ALLOWED_HOST_KEY_TYPE}'}
+
+    existing = Host.query.filter_by(hostname=hostname).first()
+    if existing is not None:
+        if existing.is_enrolled:
+            return {'enrolled': False, 'reason': 'hostname already enrolled'}
+        existing.public_key = host_pubkey
+        existing.enrolled_at = datetime.utcnow()
+        existing.enrollment_token = None
+        existing.enrollment_expires_at = None
+        return {'enrolled': True, 'hostname': hostname, 'reused_pending': True}
+
+    host = Host(
+        hostname=hostname,
+        public_key=host_pubkey,
+        enrolled_at=datetime.utcnow(),
+        created_by_id=user.id,
+    )
+    db.session.add(host)
+    return {'enrolled': True, 'hostname': hostname, 'reused_pending': False}
+
+
+@app.route('/api/auth_status/<token>')
+def api_auth_status(token):
+    """Polled by the await page in the browser. Logs the user in once verified."""
+    challenge = Challenge.query.filter_by(token=token).first()
+    if not challenge:
+        return jsonify({'status': 'unknown'}), 404
+
+    if challenge.expires_at < datetime.utcnow() and challenge.consumed_at is None:
+        return jsonify({'status': 'expired'})
+
+    if challenge.consumed_at is None:
+        return jsonify({'status': 'pending'})
+
+    # Consumed: only the originating browser session may convert it to a login.
+    if session.get('pending_challenge_token') != token:
+        return jsonify({'status': 'completed_other_session'})
+
+    user = challenge.user
+    if user.completed_at is None:
+        return jsonify({'status': 'pending'})
+
+    login_user(user)
+    session.pop('pending_challenge_token', None)
+    return jsonify({
+        'status': 'completed',
+        'redirect': url_for('dashboard'),
+        'is_admin': bool(user.is_admin),
+    })
 
 
 @app.route('/api/enroll/script')

@@ -4,45 +4,52 @@
 
 {% block content %}
 <div class="container mt-5">
-    <div class="row justify-content-center">
-        <div class="col-md-6">
-            <div class="card shadow-lg">
-                <div class="card-body p-5">
-                    <h2 class="text-center mb-4">
-                        <i class="bi bi-shield-lock"></i> SSH Cert Admin
-                    </h2>
-                    <h5 class="text-center mb-4 text-muted">Create Account</h5>
-                    
-                    <form method="POST">
-                        <div class="mb-3">
-                            <label for="username" class="form-label">Username</label>
-                            <input type="text" class="form-control form-control-lg" id="username" name="username" required>
-                        </div>
-                        
-                        <div class="mb-3">
-                            <label for="email" class="form-label">Email</label>
-                            <input type="email" class="form-control form-control-lg" id="email" name="email" required>
-                        </div>
-                        
-                        <div class="mb-3">
-                            <label for="password" class="form-label">Password</label>
-                            <input type="password" class="form-control form-control-lg" id="password" name="password" required>
-                        </div>
-                        
-                        <div class="mb-3">
-                            <label for="confirm" class="form-label">Confirm Password</label>
-                            <input type="password" class="form-control form-control-lg" id="confirm" name="confirm" required>
-                        </div>
-                        
-                        <button type="submit" class="btn btn-primary btn-lg w-100 mb-3">Register</button>
-                    </form>
-                    
-                    <div class="text-center">
-                        <p class="text-muted">Already have an account? <a href="/login">Login here</a></p>
-                    </div>
-                </div>
+  <div class="row justify-content-center">
+    <div class="col-md-8">
+      <div class="card shadow-lg">
+        <div class="card-body p-4">
+          <h2 class="text-center mb-3">
+            <i class="bi bi-shield-lock"></i> SSH Cert Admin
+          </h2>
+          <h5 class="text-center mb-4 text-muted">Create Account</h5>
+
+          <p class="text-muted small">
+            Registration is verified by signing a one-time challenge with the
+            private half of an SSH keypair. Submit your username and SSH public
+            key &mdash; the next page will give you a one-line command to run on
+            a machine that holds your private key.
+          </p>
+
+          <form method="POST">
+            <div class="mb-3">
+              <label for="username" class="form-label">Username <span class="text-danger">*</span></label>
+              <input type="text" class="form-control form-control-lg" id="username" name="username"
+                     placeholder="e.g. jdoe" autocomplete="username" required>
             </div>
+
+            <div class="mb-3">
+              <label for="public_key" class="form-label">SSH Public Key <span class="text-danger">*</span></label>
+              <textarea class="form-control" id="public_key" name="public_key" rows="4"
+                        placeholder="ecdsa-sha2-nistp521 AAAA... user@host" required></textarea>
+              <small class="form-text text-muted">
+                Allowed key types: {{ allowed_key_types|join(', ') }}.
+                Get yours with <code>cat ~/.ssh/id_ecdsa.pub</code> (or <code>id_ed25519.pub</code>).
+              </small>
+            </div>
+
+            <button type="submit" class="btn btn-primary btn-lg w-100 mb-3">
+              <i class="bi bi-key"></i> Begin Registration
+            </button>
+          </form>
+
+          <div class="text-center">
+            <p class="text-muted small mb-0">
+              Already have an account? <a href="{{ url_for('login') }}">Log in</a>
+            </p>
+          </div>
         </div>
+      </div>
     </div>
+  </div>
 </div>
 {% endblock %}
