@@ -21,9 +21,10 @@
     <div class="card-body">
         {% if certificates %}
         <div class="table-responsive">
-            <table class="table table-hover">
+            <table class="table table-hover align-middle">
                 <thead>
                     <tr>
+                        <th></th>
                         <th>Type</th>
                         <th>Subject</th>
                         <th>Serial</th>
@@ -36,7 +37,19 @@
                 </thead>
                 <tbody>
                     {% for cert in certificates %}
+                    {% set subject = cert.user.username if cert.user else (cert.host.hostname if cert.host else cert.serial) %}
+                    {% set api_url = url_for('api_cert_user', username=subject) if cert.cert_type == 'user' else url_for('api_cert_host', hostname=subject) %}
                     <tr>
+                        <td class="ps-2">
+                            <button class="btn btn-sm btn-outline-secondary border-0 p-0 px-1"
+                                    type="button"
+                                    data-bs-toggle="collapse"
+                                    data-bs-target="#cert-detail-{{ cert.id }}"
+                                    aria-expanded="false"
+                                    title="Show certificate">
+                                <i class="bi bi-plus-lg"></i>
+                            </button>
+                        </td>
                         <td>
                             {% if cert.cert_type == 'user' %}
                                 <span class="badge bg-info"><i class="bi bi-person"></i> User</span>
@@ -44,15 +57,7 @@
                                 <span class="badge bg-warning"><i class="bi bi-hdd-rack"></i> Host</span>
                             {% endif %}
                         </td>
-                        <td>
-                            <strong>
-                                {% if cert.user %}
-                                    {{ cert.user.username }}
-                                {% elif cert.host %}
-                                    {{ cert.host.hostname }}
-                                {% endif %}
-                            </strong>
-                        </td>
+                        <td><strong>{{ subject }}</strong></td>
                         <td>
                             <code title="{{ cert.serial }}">{{ cert.serial[:16] }}...</code>
                         </td>
@@ -71,9 +76,39 @@
                                 <a href="{{ url_for('cert_install', cert_id=cert.id) }}" class="btn btn-primary" title="Install instructions">
                                     <i class="bi bi-download"></i> Install
                                 </a>
-                                <a href="{{ url_for('download_cert', cert_id=cert.id) }}" class="btn btn-outline-secondary" title="Download cert file">
+                                <a href="{{ api_url }}" class="btn btn-outline-secondary" title="Download cert file" download="sshadmin-{{ cert.cert_type }}-{{ subject }}-cert.pub">
                                     <i class="bi bi-file-earmark-arrow-down"></i>
                                 </a>
+                            </div>
+                        </td>
+                    </tr>
+                    <tr class="collapse bg-light" id="cert-detail-{{ cert.id }}">
+                        <td colspan="9" class="py-2 px-3">
+                            <div class="d-flex justify-content-between align-items-start gap-3">
+                                <div class="flex-grow-1 min-w-0">
+                                    <div class="d-flex align-items-center gap-2 mb-1">
+                                        <small class="text-muted fw-semibold">Certificate data</small>
+                                        <button class="btn btn-xs btn-outline-secondary py-0 px-1"
+                                                style="font-size:.75rem"
+                                                onclick="copyCert({{ cert.id }}, this)">
+                                            <i class="bi bi-clipboard"></i> Copy
+                                        </button>
+                                        <a href="{{ api_url }}" class="btn btn-xs btn-outline-primary py-0 px-1"
+                                           style="font-size:.75rem"
+                                           download="sshadmin-{{ cert.cert_type }}-{{ subject }}-cert.pub">
+                                            <i class="bi bi-download"></i> Download
+                                        </a>
+                                    </div>
+                                    <pre id="cert-data-{{ cert.id }}" class="mb-2 p-2 rounded bg-white border small" style="white-space:pre-wrap;word-break:break-all;font-size:.7rem;max-height:6rem;overflow:auto">{{ cert.certificate_data or '' }}</pre>
+                                    <small class="text-muted">
+                                        One-liner:
+                                        {% if cert.cert_type == 'user' %}
+                                        <code>ssh {{ current_user.username }}@{{ request.host.split(':')[0] }}{% if ssh_port != 22 %} -p {{ ssh_port }}{% endif %} get_cert {{ subject }} &gt; ~/.ssh/id_ecdsa-cert.pub</code>
+                                        {% else %}
+                                        <code>ssh {{ current_user.username }}@{{ request.host.split(':')[0] }}{% if ssh_port != 22 %} -p {{ ssh_port }}{% endif %} get_cert {{ subject }} | sudo tee /etc/ssh/ssh_host_ecdsa_key-cert.pub</code>
+                                        {% endif %}
+                                    </small>
+                                </div>
                             </div>
                         </td>
                     </tr>
@@ -94,7 +129,13 @@
 
 {% block extra_js %}
 <script>
-// Make 'now' available for templates
-window.now = new Date();
+function copyCert(id, btn) {
+    const text = document.getElementById('cert-data-' + id).textContent;
+    navigator.clipboard.writeText(text).then(() => {
+        const orig = btn.innerHTML;
+        btn.innerHTML = '<i class="bi bi-check"></i> Copied';
+        setTimeout(() => { btn.innerHTML = orig; }, 1500);
+    });
+}
 </script>
 {% endblock %}
