@@ -364,6 +364,7 @@ _CA_SETUP_ALLOWED_ENDPOINTS = {
     'api_totp_response',
     'api_enroll_script', 'api_enroll_host',
     'api_cert_install_data', 'api_cert_install_script',
+    'api_cert_user', 'api_cert_host',
 }
 
 
@@ -1040,8 +1041,12 @@ def certificates():
     if not current_user.is_admin:
         owned_ids = [u.id for u in SSHUser.query.filter_by(created_by_id=current_user.id)]
         q = q.filter(Certificate.user_id.in_(owned_ids))
+    ssh_port = app.config.get('SSHADMIN_SSH_PORT',
+                              int(os.environ.get('SSHADMIN_SSH_PORT', 2222)))
     return render_template('certificates.html', certificates=q.all(),
-                           viewing_as_admin=current_user.is_admin)
+                           viewing_as_admin=current_user.is_admin,
+                           now=datetime.utcnow(),
+                           ssh_port=ssh_port)
 
 
 @app.route('/certificates/issue/user', methods=['GET', 'POST'])
@@ -1288,6 +1293,51 @@ def api_cert_install_script():
         target_name=target_name,
     )
     return Response(script, mimetype='text/x-shellscript; charset=utf-8')
+
+
+def _latest_valid_cert(cert_type, **filter_kwargs):
+    """Return the most-recently-issued still-valid Certificate matching the filters."""
+    return (Certificate.query
+            .filter_by(cert_type=cert_type, **filter_kwargs)
+            .filter(Certificate.valid_until > datetime.utcnow())
+            .order_by(Certificate.created_at.desc())
+            .first())
+
+
+@app.route('/api/cert/user/<username>')
+def api_cert_user(username):
+    """Public: return the latest valid user certificate in OpenSSH format."""
+    sshuser = SSHUser.query.filter_by(username=username).first_or_404()
+    cert = _latest_valid_cert('user', user_id=sshuser.id)
+    if not cert or not cert.certificate_data:
+        return Response('# no valid certificate\n', status=404, mimetype='text/plain')
+    return Response(cert.certificate_data.strip() + '\n', mimetype='text/plain; charset=utf-8')
+
+
+@app.route('/api/cert/host/<path:hostname>')
+def api_cert_host(hostname):
+    """Public: return the latest valid host certificate in OpenSSH format."""
+    host = Host.query.filter_by(hostname=hostname).first_or_404()
+    cert = _latest_valid_cert('host', host_id=host.id)
+    if not cert or not cert.certificate_data:
+        return Response('# no valid certificate\n', status=404, mimetype='text/plain')
+    return Response(cert.certificate_data.strip() + '\n', mimetype='text/plain; charset=utf-8')
+
+
+def _ssh_get_cert(subject: str):
+    """Look up the latest valid cert for subject (hostname tried first, then username)."""
+    with app.app_context():
+        host = Host.query.filter_by(hostname=subject).first()
+        if host:
+            cert = _latest_valid_cert('host', host_id=host.id)
+            if cert and cert.certificate_data:
+                return cert.certificate_data.strip() + '\n'
+        sshuser = SSHUser.query.filter_by(username=subject).first()
+        if sshuser:
+            cert = _latest_valid_cert('user', user_id=sshuser.id)
+            if cert and cert.certificate_data:
+                return cert.certificate_data.strip() + '\n'
+    return None
 
 
 @app.route('/api/ca-status')
@@ -1656,12 +1706,14 @@ def _start_ssh_auth_server_if_enabled():
         sock = start_ssh_auth_server(
             app=app, db=db,
             models={'User': User, 'Challenge': Challenge,
-                    'finalize_challenge': _finalize_consumed_challenge},
+                    'finalize_challenge': _finalize_consumed_challenge,
+                    'get_cert': _ssh_get_cert},
             host=bind, port=port,
             ca_key_path=cert_gen.ca_key if cert_gen.check_ca_keys() else None,
             host_principals=['sshadmin', public_host or '*'],
         )
         actual_port = sock.getsockname()[1]
+        app.config['SSHADMIN_SSH_PORT'] = actual_port
         cert_note = ' (host key signed by CA)' if cert_gen.check_ca_keys() else ''
         print(f'[sshadmin] SSH auth server listening on {bind}:{actual_port}{cert_note}', flush=True)
         return sock
