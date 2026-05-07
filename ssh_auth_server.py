@@ -286,19 +286,45 @@ def _serve_exec(channel, server_iface, app, models):
     parts = cmd.split(maxsplit=1)
     exit_status = 1
     try:
-        if len(parts) != 2 or parts[0] != 'auth':
-            channel.send(b'Usage: ssh -p <port> <user>@<host> auth <token>\r\n')
-            exit_status = 2
-            return
+        verb = parts[0] if parts else ''
 
-        token = parts[1].strip()
-        ok, message, _ = _consume_token(token, server_iface.user_id, app, models)
-        if ok:
-            channel.send(f'OK: {message}\r\n'.encode())
-            exit_status = 0
+        if verb == 'auth':
+            if len(parts) != 2:
+                channel.send(b'Usage: ssh -p <port> <user>@<host> auth <token>\r\n')
+                exit_status = 2
+                return
+            token = parts[1].strip()
+            ok, message, _ = _consume_token(token, server_iface.user_id, app, models)
+            if ok:
+                channel.send(f'OK: {message}\r\n'.encode())
+                exit_status = 0
+            else:
+                channel.send(f'ERROR: {message}\r\n'.encode())
+                exit_status = 1
+
+        elif verb == 'get_cert':
+            if len(parts) != 2:
+                channel.send(b'Usage: ssh <user>@<host> get_cert <subject>\r\n')
+                exit_status = 2
+                return
+            subject = parts[1].strip()
+            get_cert_fn = models.get('get_cert')
+            if get_cert_fn is None:
+                channel.send(b'ERROR: get_cert not available\r\n')
+                exit_status = 1
+                return
+            cert_data = get_cert_fn(subject)
+            if cert_data is None:
+                channel.send(f'ERROR: no valid certificate found for {subject!r}\r\n'.encode())
+                exit_status = 1
+            else:
+                channel.sendall(cert_data.encode())
+                exit_status = 0
+
         else:
-            channel.send(f'ERROR: {message}\r\n'.encode())
-            exit_status = 1
+            channel.send(b'Usage: ssh <user>@<host> auth <token>\r\n')
+            channel.send(b'       ssh <user>@<host> get_cert <subject>\r\n')
+            exit_status = 2
     finally:
         _close_channel(channel, exit_status=exit_status)
 
