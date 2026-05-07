@@ -19,7 +19,7 @@ sys.path.insert(0, str(_ROOT))
 
 _TESTDIR = Path(tempfile.mkdtemp(prefix='sshadmin-tests-'))
 os.environ['DATABASE_URL'] = f'sqlite:///{_TESTDIR}/test.db'
-os.environ['SSHADMIN_CA_KEY_PATH'] = str(_TESTDIR / 'ca_key')
+os.environ['SSH_CA_KEY'] = str(_TESTDIR / 'ca_key')
 os.environ['SECRET_KEY'] = 'test-secret-do-not-use'
 
 import sshadmin  # noqa: E402

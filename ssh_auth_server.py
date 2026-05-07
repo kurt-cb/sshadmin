@@ -239,8 +239,7 @@ def _consume_token(token, authenticated_user_id, app, models):
             return False, 'token expired. Restart from the browser.', None
 
         challenge.consumed_at = datetime.utcnow()
-        from sshadmin import _finalize_consumed_challenge
-        _finalize_consumed_challenge(challenge)
+        models['finalize_challenge'](challenge)
         db.session.commit()
         user = db.session.get(User, challenge.user_id)
         return True, (

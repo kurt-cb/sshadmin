@@ -120,10 +120,10 @@ class SSHUser(db.Model):
     description = db.Column(db.Text)
     created_at = db.Column(db.DateTime, default=datetime.utcnow)
     created_by_id = db.Column(db.Integer, db.ForeignKey('user.id'), nullable=False)
-    
+
     creator = db.relationship('User', backref='ssh_users')
     certificates = db.relationship('Certificate', backref='user', lazy=True, cascade='all, delete-orphan')
-    
+
     __table_args__ = (db.UniqueConstraint('username', 'public_key', name='_username_key_uc'),)
 
 
@@ -228,7 +228,7 @@ class SSHCertificateGenerator:
     """Generate SSH certificates using OpenSSH format"""
 
     def __init__(self):
-        self.ca_key = os.environ.get('SSHADMIN_CA_KEY_PATH', '/etc/ssh/ca_key')
+        self.ca_key = os.environ.get('SSH_CA_KEY', '/etc/ssh/ca_key')
         self.ca_pubkey = self.ca_key + '.pub'
 
     def check_ca_keys(self):
@@ -269,7 +269,7 @@ class SSHCertificateGenerator:
             return result.stdout.strip()
         except Exception:
             return None
-    
+
     def generate_user_certificate(self, public_key_path, username, valid_days=365, principals=None):
         """Generate SSH user certificate"""
         if principals is None:
@@ -293,22 +293,22 @@ class SSHCertificateGenerator:
                 '-z', str(serial),
                 public_key_path
             ]
-            
+
             result = subprocess.run(cmd, capture_output=True, text=True, check=True)
             # ssh-keygen writes the cert at `<input-without-.pub>-cert.pub`.
             base = public_key_path[:-4] if public_key_path.endswith('.pub') else public_key_path
             cert_path = f'{base}-cert.pub'
-            
+
             if os.path.exists(cert_path):
                 with open(cert_path, 'r') as f:
                     cert_data = f.read().strip()
                 os.remove(cert_path)
                 return cert_data, str(serial)
-            
+
             raise Exception("Certificate generation failed")
         except subprocess.CalledProcessError as e:
             raise Exception(f"SSH keygen error: {e.stderr}")
-    
+
     def generate_host_certificate(self, public_key_path, hostnames, valid_days=365):
         """Generate SSH host certificate"""
         if isinstance(hostnames, str):
@@ -318,7 +318,7 @@ class SSHCertificateGenerator:
         valid_after = now.strftime('%Y%m%d%H%M%S')
         valid_before = (now + timedelta(days=valid_days)).strftime('%Y%m%d%H%M%S')
         serial = int(now.timestamp() * 1000)
-        
+
         try:
             cmd = [
                 'ssh-keygen',
@@ -330,18 +330,18 @@ class SSHCertificateGenerator:
                 '-z', str(serial),
                 public_key_path
             ]
-            
+
             result = subprocess.run(cmd, capture_output=True, text=True, check=True)
             # ssh-keygen writes the cert at `<input-without-.pub>-cert.pub`.
             base = public_key_path[:-4] if public_key_path.endswith('.pub') else public_key_path
             cert_path = f'{base}-cert.pub'
-            
+
             if os.path.exists(cert_path):
                 with open(cert_path, 'r') as f:
                     cert_data = f.read().strip()
                 os.remove(cert_path)
                 return cert_data, str(serial)
-            
+
             raise Exception("Certificate generation failed")
         except subprocess.CalledProcessError as e:
             raise Exception(f"SSH keygen error: {e.stderr}")
@@ -989,16 +989,16 @@ def add_user():
         username = request.form.get('username')
         description = request.form.get('description')
         public_key = request.form.get('public_key')
-        
+
         if not username or not public_key:
             flash('Username and public key are required', 'danger')
             return redirect(url_for('add_user'))
-        
+
         existing = SSHUser.query.filter_by(username=username, public_key=public_key).first()
         if existing:
             flash('SSH user with this key already exists', 'danger')
             return redirect(url_for('add_user'))
-        
+
         user = SSHUser(
             username=username,
             description=description,
@@ -1007,10 +1007,10 @@ def add_user():
         )
         db.session.add(user)
         db.session.commit()
-        
+
         flash(f'SSH user {username} added successfully', 'success')
         return redirect(url_for('users'))
-    
+
     return render_template('add_user.html')
 
 
@@ -1052,24 +1052,24 @@ def issue_user_cert():
             .order_by(SSHUser.username)
             .all()
         )
-    
+
     if request.method == 'POST':
         user_id = request.form.get('user_id')
         valid_days = int(request.form.get('valid_days', 365))
         principals = request.form.get('principals', '').strip().split(',')
         principals = [p.strip() for p in principals if p.strip()]
-        
+
         ssh_user = SSHUser.query.get_or_404(user_id)
-        
+
         if not principals:
             principals = [ssh_user.username]
-        
+
         try:
             # Create temporary file with public key
             with tempfile.NamedTemporaryFile(mode='w', delete=False, suffix='.pub') as f:
                 f.write(ssh_user.public_key)
                 temp_key = f.name
-            
+
             try:
                 cert_data, serial = cert_gen.generate_user_certificate(
                     temp_key,
@@ -1077,7 +1077,7 @@ def issue_user_cert():
                     valid_days,
                     principals
                 )
-                
+
                 cert = Certificate(
                     cert_type='user',
                     user_id=ssh_user.id,
@@ -1098,7 +1098,7 @@ def issue_user_cert():
                 os.unlink(temp_key)
         except Exception as e:
             flash(f'Error issuing certificate: {str(e)}', 'danger')
-    
+
     return render_template('issue_user_cert.html', users=ssh_users)
 
 
@@ -1124,19 +1124,19 @@ def issue_host_cert():
         if not _can_admin_host(host):
             flash('You can only issue certificates for hosts you own.', 'danger')
             return redirect(url_for('issue_host_cert'))
-        
+
         try:
             with tempfile.NamedTemporaryFile(mode='w', delete=False, suffix='.pub') as f:
                 f.write(host.public_key)
                 temp_key = f.name
-            
+
             try:
                 cert_data, serial = cert_gen.generate_host_certificate(
                     temp_key,
                     host.hostname,
                     valid_days
                 )
-                
+
                 cert = Certificate(
                     cert_type='host',
                     host_id=host.id,
@@ -1157,7 +1157,7 @@ def issue_host_cert():
                 os.unlink(temp_key)
         except Exception as e:
             flash(f'Error issuing certificate: {str(e)}', 'danger')
-    
+
     return render_template('issue_host_cert.html', hosts=hosts)
 
 
@@ -1631,7 +1631,7 @@ def _log_startup_status():
         print(
             f'[sshadmin] WARNING: CA key not found at {cert_gen.ca_key}. '
             f'Log in as the first registered user (auto-admin) and visit /setup/ca '
-            f'to generate one. Override path via SSHADMIN_CA_KEY_PATH.',
+            f'to generate one. Override path via SSH_CA_KEY.',
             flush=True,
         )
 
@@ -1647,7 +1647,8 @@ def _start_ssh_auth_server_if_enabled():
         from ssh_auth_server import start_ssh_auth_server
         sock = start_ssh_auth_server(
             app=app, db=db,
-            models={'User': User, 'Challenge': Challenge},
+            models={'User': User, 'Challenge': Challenge,
+                    'finalize_challenge': _finalize_consumed_challenge},
             host=bind, port=port,
             ca_key_path=cert_gen.ca_key if cert_gen.check_ca_keys() else None,
             host_principals=['sshadmin', public_host or '*'],
