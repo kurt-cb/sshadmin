@@ -29,7 +29,8 @@ def ssh_server(app):
     host_key_path = str(_TESTDIR / 'ssh_host_key_test')
     sock = start_ssh_auth_server(
         app=sshadmin.app, db=sshadmin.db,
-        models={'User': sshadmin.User, 'Challenge': sshadmin.Challenge},
+        models={'User': sshadmin.User, 'Challenge': sshadmin.Challenge,
+                'finalize_challenge': sshadmin._finalize_consumed_challenge},
         host='127.0.0.1', port=0,
         host_key_path=host_key_path,
     )
