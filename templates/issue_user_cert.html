@@ -25,26 +25,49 @@
                         <small class="text-danger">No SSH users available. <a href="/users/add">Add one first</a></small>
                         {% endif %}
                     </div>
-                    
+
                     <div class="mb-3">
                         <label for="valid_days" class="form-label">Valid For (days)</label>
-                        <input type="number" class="form-control" id="valid_days" name="valid_days" 
+                        <input type="number" class="form-control" id="valid_days" name="valid_days"
                                value="365" min="1" max="3650">
                         <small class="form-text text-muted">How long the certificate should be valid (default: 365 days)</small>
                     </div>
-                    
+
                     <div class="mb-3">
                         <label for="principals" class="form-label">Principals</label>
-                        <textarea class="form-control" id="principals" name="principals" rows="3" 
+                        <textarea class="form-control" id="principals" name="principals" rows="3"
                                   placeholder="Comma-separated list of principals (optional)&#10;e.g., john, john.doe, admin&#10;If empty, will use the username"></textarea>
                         <small class="form-text text-muted">Linux usernames that can authenticate with this certificate</small>
                     </div>
-                    
+
+                    <hr class="my-3">
+                    <h6 class="mb-3 text-muted">Critical Options <small class="fw-normal">(optional)</small></h6>
+
+                    <div class="mb-3">
+                        <label for="source_address" class="form-label">Source Address Restriction</label>
+                        <input type="text" class="form-control" id="source_address" name="source_address"
+                               placeholder="e.g. 192.168.1.0/24,10.0.0.0/8">
+                        <small class="form-text text-muted">
+                            Comma-separated IP addresses or CIDR ranges. Certificate will only be accepted
+                            from these source addresses (<code>source-address</code> critical option).
+                        </small>
+                    </div>
+
+                    <div class="mb-3">
+                        <label for="force_command" class="form-label">Force Command</label>
+                        <input type="text" class="form-control" id="force_command" name="force_command"
+                               placeholder="e.g. /usr/bin/rsync --server">
+                        <small class="form-text text-muted">
+                            If set, this command is executed instead of the user's shell or requested command
+                            (<code>force-command</code> critical option).
+                        </small>
+                    </div>
+
                     <div class="alert alert-info" role="alert">
-                        <i class="bi bi-info-circle"></i> 
+                        <i class="bi bi-info-circle"></i>
                         <strong>Note:</strong> Ensure the CA key is properly configured on your system before issuing certificates.
                     </div>
-                    
+
                     <div class="d-flex gap-2">
                         <button type="submit" class="btn btn-success" {% if not users %}disabled{% endif %}>
                             <i class="bi bi-file-certificate"></i> Issue Certificate
@@ -55,7 +78,7 @@
             </div>
         </div>
     </div>
-    
+
     <div class="col-md-4">
         <div class="card">
             <div class="card-header">
@@ -64,7 +87,7 @@
             <div class="card-body">
                 <p><strong>What are they?</strong></p>
                 <p>SSH user certificates allow users to authenticate to any host that trusts the CA, without needing individual authorized_keys entries.</p>
-                
+
                 <p><strong>Benefits:</strong></p>
                 <ul class="small">
                     <li>Centralized authentication</li>
@@ -72,7 +95,15 @@
                     <li>Principals for role-based access</li>
                     <li>Audit trail</li>
                 </ul>
-                
+
+                <p><strong>Critical Options:</strong></p>
+                <dl class="small">
+                    <dt><code>source-address</code></dt>
+                    <dd>Restrict certificate use to specific client IPs or CIDRs. The SSH server rejects auth if the client address doesn't match.</dd>
+                    <dt><code>force-command</code></dt>
+                    <dd>Lock the certificate to a single command. Useful for restricted shells, rsync-only access, etc.</dd>
+                </dl>
+
                 <p><strong>Usage:</strong></p>
                 <code class="d-block bg-light p-2 rounded text-break">ssh -i ~/.ssh/id_ed25519-cert.pub user@host</code>
             </div>

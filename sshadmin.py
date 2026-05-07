@@ -270,18 +270,17 @@ class SSHCertificateGenerator:
         except Exception:
             return None
 
-    def generate_user_certificate(self, public_key_path, username, valid_days=365, principals=None):
-        """Generate SSH user certificate"""
+    def generate_user_certificate(self, public_key_path, username, valid_days=365,
+                                   principals=None, critical_options=None):
+        """Generate SSH user certificate.
+
+        critical_options: dict with optional keys 'source-address' (comma-separated
+        CIDRs) and/or 'force-command' (shell command string).
+        """
         if principals is None:
             principals = [username]
 
-        # ssh-keygen -V wants YYYYMMDDHHMMSS in the local timezone, not Unix epoch.
-        now = datetime.utcnow()
-        valid_after = now.strftime('%Y%m%d%H%M%S')
-        valid_before = (now + timedelta(days=valid_days)).strftime('%Y%m%d%H%M%S')
-
-        # Certificate serial (can be any unique number)
-        serial = int(now.timestamp() * 1000)
+        serial = int(datetime.now().timestamp() * 1000)
 
         try:
             cmd = [
@@ -289,10 +288,17 @@ class SSHCertificateGenerator:
                 '-s', self.ca_key,
                 '-I', f'{username}-{serial}',
                 '-n', ','.join(principals),
-                '-V', f'{valid_after}:{valid_before}',
+                '-V', f'always:+{valid_days}d',
                 '-z', str(serial),
-                public_key_path
             ]
+            if critical_options:
+                src = critical_options.get('source-address', '').strip()
+                cmd_opt = critical_options.get('force-command', '').strip()
+                if src:
+                    cmd += ['-O', f'source-address={src}']
+                if cmd_opt:
+                    cmd += ['-O', f'force-command={cmd_opt}']
+            cmd.append(public_key_path)
 
             result = subprocess.run(cmd, capture_output=True, text=True, check=True)
             # ssh-keygen writes the cert at `<input-without-.pub>-cert.pub`.
@@ -314,10 +320,7 @@ class SSHCertificateGenerator:
         if isinstance(hostnames, str):
             hostnames = [hostnames]
 
-        now = datetime.utcnow()
-        valid_after = now.strftime('%Y%m%d%H%M%S')
-        valid_before = (now + timedelta(days=valid_days)).strftime('%Y%m%d%H%M%S')
-        serial = int(now.timestamp() * 1000)
+        serial = int(datetime.now().timestamp() * 1000)
 
         try:
             cmd = [
@@ -326,7 +329,7 @@ class SSHCertificateGenerator:
                 '-h',  # Host certificate
                 '-I', f'host-{serial}',
                 '-n', ','.join(hostnames),
-                '-V', f'{valid_after}:{valid_before}',
+                '-V', f'always:+{valid_days}d',
                 '-z', str(serial),
                 public_key_path
             ]
@@ -1032,37 +1035,39 @@ def delete_user(user_id):
 @app.route('/certificates')
 @login_required
 def certificates():
-    """View certificates. Non-admins see only ones they created."""
+    """View certificates. Non-admins see certs for SSH users they created."""
     q = Certificate.query.order_by(Certificate.created_at.desc())
     if not current_user.is_admin:
-        q = q.filter_by(created_by_id=current_user.id)
+        owned_ids = [u.id for u in SSHUser.query.filter_by(created_by_id=current_user.id)]
+        q = q.filter(Certificate.user_id.in_(owned_ids))
     return render_template('certificates.html', certificates=q.all(),
                            viewing_as_admin=current_user.is_admin)
 
 
 @app.route('/certificates/issue/user', methods=['GET', 'POST'])
-@login_required
+@admin_required
 def issue_user_cert():
-    """Issue user certificate. Non-admins can only issue for SSHUsers they created."""
-    if current_user.is_admin:
-        ssh_users = SSHUser.query.order_by(SSHUser.username).all()
-    else:
-        ssh_users = (
-            SSHUser.query.filter_by(created_by_id=current_user.id)
-            .order_by(SSHUser.username)
-            .all()
-        )
+    """Issue user certificate. Admin only."""
+    ssh_users = SSHUser.query.order_by(SSHUser.username).all()
 
     if request.method == 'POST':
         user_id = request.form.get('user_id')
         valid_days = int(request.form.get('valid_days', 365))
         principals = request.form.get('principals', '').strip().split(',')
         principals = [p.strip() for p in principals if p.strip()]
+        source_address = request.form.get('source_address', '').strip()
+        force_command = request.form.get('force_command', '').strip()
 
         ssh_user = SSHUser.query.get_or_404(user_id)
 
         if not principals:
             principals = [ssh_user.username]
+
+        critical_options = {}
+        if source_address:
+            critical_options['source-address'] = source_address
+        if force_command:
+            critical_options['force-command'] = force_command
 
         try:
             # Create temporary file with public key
@@ -1075,7 +1080,8 @@ def issue_user_cert():
                     temp_key,
                     ssh_user.username,
                     valid_days,
-                    principals
+                    principals,
+                    critical_options or None,
                 )
 
                 cert = Certificate(
@@ -1166,8 +1172,9 @@ def issue_host_cert():
 def download_cert(cert_id):
     """Return the OpenSSH-format certificate as a file."""
     cert = Certificate.query.get_or_404(cert_id)
-    if not (current_user.is_admin or cert.created_by_id == current_user.id):
-        flash('You can only download certificates you issued.', 'danger')
+    if not (current_user.is_admin or cert.created_by_id == current_user.id
+            or (cert.user and cert.user.created_by_id == current_user.id)):
+        flash('You do not have access to this certificate.', 'danger')
         return redirect(url_for('certificates'))
     if not cert.certificate_data:
         flash('Certificate has no data on file.', 'danger')
@@ -1187,8 +1194,9 @@ def download_cert(cert_id):
 def cert_install(cert_id):
     """Show the install one-liner + manual instructions for a certificate."""
     cert = Certificate.query.get_or_404(cert_id)
-    if not (current_user.is_admin or cert.created_by_id == current_user.id):
-        flash('You can only install certificates you issued.', 'danger')
+    if not (current_user.is_admin or cert.created_by_id == current_user.id
+            or (cert.user and cert.user.created_by_id == current_user.id)):
+        flash('You do not have access to this certificate.', 'danger')
         return redirect(url_for('certificates'))
 
     if not cert.install_token or (
