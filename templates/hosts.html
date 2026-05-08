@@ -5,9 +5,20 @@
 {% block content %}
 <div class="d-flex justify-content-between align-items-center mb-4">
     <h1>SSH Hosts</h1>
-    <a href="/hosts/add" class="btn btn-primary">
-        <i class="bi bi-plus-circle"></i> Add Host
-    </a>
+    <div class="d-flex gap-2 align-items-end">
+        <a href="/hosts/add" class="btn btn-primary">
+            <i class="bi bi-plus-circle"></i> Add Host
+        </a>
+        <div class="text-end">
+            <a href="{{ url_for('download_sshadmin_add') }}" class="btn btn-outline-secondary">
+                <i class="bi bi-download"></i> sshadmin_add
+            </a>
+            <div class="text-muted" style="font-size:.75rem; margin-top:2px">
+                Run on <strong>this machine</strong> to enroll another:
+                <code>sshadmin_add user@new-host</code>
+            </div>
+        </div>
+    </div>
 </div>
 
 <div class="card">
