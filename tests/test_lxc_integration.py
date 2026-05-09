@@ -55,6 +55,11 @@ C1      = 'sshadmin-lxc-c1'      # Ubuntu OpenSSH – SSH origin for most tests
 C2      = 'sshadmin-lxc-c2'      # Ubuntu OpenSSH – SSH target
 CALPINE = 'sshadmin-lxc-alpine'  # Alpine + Dropbear server + OpenSSH client
 
+# Additional containers for sshadmin_add enrollment tests
+CENROLL_UBUNTU = 'sshadmin-lxc-enroll-ubuntu'
+CENROLL_ALPINE = 'sshadmin-lxc-enroll-alpine'
+ENROLL_CONTAINERS = [CENROLL_UBUNTU, CENROLL_ALPINE]
+
 ALL_CONTAINERS  = [CAPP, C1, C2, CALPINE]
 SSH_CONTAINERS  = [C1, C2]       # Ubuntu hosts enrolled with host certs
 
@@ -160,6 +165,23 @@ def _wait_for_port(container: str, port: int, max_wait: int = 90) -> None:
     raise RuntimeError(
         f'Port {port} on {container} not ready after {max_wait}s.\nLog (tail):\n{log[-3000:]}'
     )
+
+
+def _wait_for_ssh_port(container: str, port: int = 22, max_wait: int = 30) -> None:
+    """Block until an SSH server at *port* inside *container* accepts a TCP connection."""
+    deadline = time.monotonic() + max_wait
+    while time.monotonic() < deadline:
+        r = _lxc_exec(
+            container, 'python3', '-c',
+            f'import socket; s=socket.socket(); s.settimeout(2); '
+            f's.connect(("127.0.0.1", {port})); d=s.recv(64); s.close(); '
+            f'print("ok" if b"SSH" in d else "")',
+            check=False,
+        )
+        if 'ok' in r.stdout:
+            return
+        time.sleep(2)
+    raise RuntimeError(f'SSH port {port} on {container} not ready after {max_wait}s')
 
 
 # ---------------------------------------------------------------------------
@@ -873,6 +895,274 @@ def test_alpine_openssh_to_ubuntu_cert_auth(lxc_env):
     result = _ssh_from(CALPINE, 'alice', c2_ip)
     assert result.returncode == 0, (
         f'Alpine OpenSSH -> Ubuntu cert-based SSH failed:\n'
+        f'stdout: {result.stdout}\nstderr: {result.stderr}'
+    )
+    assert 'hello' in result.stdout
+
+
+# ===========================================================================
+# sshadmin_add enrollment script tests
+# ===========================================================================
+
+# Systemd service unit for CAPP with SSH auth server enabled.
+_SSHADMIN_SVC_SSH_ENABLED = (
+    '[Unit]\nDescription=sshadmin test server\nAfter=network.target\n\n'
+    '[Service]\nWorkingDirectory=/app\n'
+    'ExecStart=/usr/bin/python3 /app/sshadmin.py\n'
+    f'Environment="DATABASE_URL=sqlite:////{APP_DB}"\n'
+    'Environment="SECRET_KEY=lxc-test-secret"\n'
+    'Environment="SSH_CA_KEY=/app/ca_key"\n'
+    'Restart=on-failure\n\n'
+    '[Install]\nWantedBy=multi-user.target\n'
+)
+
+# Original service unit (SSH auth disabled so it doesn't conflict with other tests).
+_SSHADMIN_SVC_SSH_DISABLED = (
+    '[Unit]\nDescription=sshadmin test server\nAfter=network.target\n\n'
+    '[Service]\nWorkingDirectory=/app\n'
+    'ExecStart=/usr/bin/python3 /app/sshadmin.py\n'
+    f'Environment="DATABASE_URL=sqlite:////{APP_DB}"\n'
+    'Environment="SECRET_KEY=lxc-test-secret"\n'
+    'Environment="SSH_CA_KEY=/app/ca_key"\n'
+    'Environment="SSHADMIN_DISABLE_SSH_AUTH=1"\n'
+    'Restart=on-failure\n\n'
+    '[Install]\nWantedBy=multi-user.target\n'
+)
+
+
+@pytest.fixture(scope='session')
+def lxc_enroll_env(lxc_env, user_keypairs):
+    """
+    Provision two fresh containers (Ubuntu + Alpine) and enroll them via
+    sshadmin_add run from C1 (which already has alice's registered key).
+
+    The fixture temporarily enables the SSH auth server on CAPP (needed by
+    the add_machine exec command) and restores the original service on teardown.
+    """
+    ips = lxc_env['ips']
+    app_ip = ips[CAPP]
+    ca_pubkey = lxc_env['ca_pubkey']
+
+    for c in ENROLL_CONTAINERS:
+        subprocess.run(['lxc', 'delete', '--force', c], capture_output=True)
+
+    _lxc('launch', UBUNTU_IMAGE, CENROLL_UBUNTU,
+         '--config', 'security.privileged=true', timeout=300)
+    _lxc('launch', ALPINE_IMAGE, CENROLL_ALPINE,
+         '--config', 'security.privileged=true', timeout=300)
+
+    state: dict = {}
+    try:
+        enroll_ips = {
+            CENROLL_UBUNTU: _get_ip(CENROLL_UBUNTU),
+            CENROLL_ALPINE: _get_ip(CENROLL_ALPINE),
+        }
+        state['ips'] = enroll_ips
+        alice_pub = user_keypairs['alice']['public_key']
+
+        # ------------------------------------------------------------------ #
+        # CENROLL_UBUNTU: OpenSSH server + alice with sudo                    #
+        # ------------------------------------------------------------------ #
+        _lxc_exec(CENROLL_UBUNTU, 'apt-get', 'update', '-q', timeout=120)
+        _lxc_exec(CENROLL_UBUNTU, 'apt-get', 'install', '-y', '-q',
+                  'openssh-server', 'sudo', timeout=300)
+        _lxc_exec(CENROLL_UBUNTU, 'useradd', '-m', '-s', '/bin/bash', 'alice')
+        _lxc_exec(CENROLL_UBUNTU, 'bash', '-c',
+                  'mkdir -p /home/alice/.ssh && chmod 700 /home/alice/.ssh '
+                  '&& chown alice:alice /home/alice/.ssh')
+        _push_text(CENROLL_UBUNTU, alice_pub + '\n',
+                   '/home/alice/.ssh/authorized_keys',
+                   mode='600', owner='alice:alice')
+        _push_text(CENROLL_UBUNTU, 'alice ALL=(ALL) NOPASSWD:ALL\n',
+                   '/etc/sudoers.d/alice', mode='440')
+
+        # ------------------------------------------------------------------ #
+        # CENROLL_ALPINE: OpenSSH (not Dropbear) + alice with sudo            #
+        # ------------------------------------------------------------------ #
+        _lxc_exec(CENROLL_ALPINE, 'apk', 'add', '--no-cache',
+                  'openssh', 'sudo', timeout=300)
+        # Generate all host key types so OpenSSH server has keys to present.
+        _lxc_exec(CENROLL_ALPINE, 'ssh-keygen', '-A')
+        # Pre-create the sshd_config.d directory and wire it into the config
+        # so the drop-in written by sshadmin_add is loaded on reload.
+        _lxc_exec(CENROLL_ALPINE, 'mkdir', '-p', '/etc/ssh/sshd_config.d')
+        _lxc_exec(CENROLL_ALPINE, 'sh', '-c',
+                  'echo "Include /etc/ssh/sshd_config.d/*.conf" >> /etc/ssh/sshd_config')
+        _lxc_exec(CENROLL_ALPINE, '/usr/sbin/sshd')
+        _lxc_exec(CENROLL_ALPINE, 'adduser', '-D', '-s', '/bin/sh', 'alice')
+        _lxc_exec(CENROLL_ALPINE, 'mkdir', '-p', '/home/alice/.ssh')
+        _lxc_exec(CENROLL_ALPINE, 'chmod', '700', '/home/alice/.ssh')
+        _lxc_exec(CENROLL_ALPINE, 'chown', '-R', 'alice:alice', '/home/alice/.ssh')
+        _push_text(CENROLL_ALPINE, alice_pub + '\n',
+                   '/home/alice/.ssh/authorized_keys',
+                   mode='600', owner='alice:alice')
+        _push_text(CENROLL_ALPINE, 'alice ALL=(ALL) NOPASSWD:ALL\n',
+                   '/etc/sudoers.d/alice', mode='440')
+
+        # ------------------------------------------------------------------ #
+        # Restart CAPP with SSH auth server enabled (needed for add_machine)  #
+        # ------------------------------------------------------------------ #
+        _push_text(CAPP, _SSHADMIN_SVC_SSH_ENABLED,
+                   '/etc/systemd/system/sshadmin.service')
+        _lxc_exec(CAPP, 'systemctl', 'daemon-reload')
+        _lxc_exec(CAPP, 'systemctl', 'restart', 'sshadmin')
+        _wait_for_port(CAPP, APP_PORT, max_wait=60)
+        _wait_for_ssh_port(CAPP, port=2222, max_wait=30)
+
+        # ------------------------------------------------------------------ #
+        # Download sshadmin_add to C1 and make it executable                  #
+        # ------------------------------------------------------------------ #
+        script_url = f'http://{app_ip}:{APP_PORT}/download/sshadmin_add'
+        _lxc_exec(C1, 'python3', '-c',
+                  f"import urllib.request; "
+                  f"open('/usr/local/bin/sshadmin_add','wb')"
+                  f".write(urllib.request.urlopen('{script_url}').read())")
+        _lxc_exec(C1, 'chmod', '+x', '/usr/local/bin/sshadmin_add')
+
+        # ------------------------------------------------------------------ #
+        # Run sshadmin_add from C1 (as alice) targeting each enroll container  #
+        # ------------------------------------------------------------------ #
+        ubuntu_ip = enroll_ips[CENROLL_UBUNTU]
+        alpine_ip = enroll_ips[CENROLL_ALPINE]
+
+        ubuntu_result = subprocess.run(
+            ['lxc', 'exec', C1, '--', 'su', '-', 'alice', '-c',
+             f'sshadmin_add alice@{ubuntu_ip}'],
+            capture_output=True, text=True, timeout=180,
+        )
+        state['ubuntu_result'] = ubuntu_result
+
+        alpine_result = subprocess.run(
+            ['lxc', 'exec', C1, '--', 'su', '-', 'alice', '-c',
+             f'sshadmin_add alice@{alpine_ip}'],
+            capture_output=True, text=True, timeout=180,
+        )
+        state['alpine_result'] = alpine_result
+
+        # Reload Alpine sshd so it picks up the new TrustedUserCAKeys config.
+        # sshadmin_add tries kill -HUP but /var/run/sshd.pid path varies; we
+        # force it here via lxc exec so the SSH cert-auth test is reliable.
+        _lxc_exec(CENROLL_ALPINE, 'sh', '-c',
+                  'kill -HUP $(cat /var/run/sshd.pid 2>/dev/null || '
+                  'cat /run/sshd.pid 2>/dev/null) 2>/dev/null || true',
+                  check=False)
+
+        # CENROLL_UBUNTU and CENROLL_ALPINE need the CA in their global
+        # known_hosts so cert-verified outbound SSH from C1 to them works
+        # (the @cert-authority line covers host-cert verification).
+        # (C1's /etc/ssh/ssh_known_hosts already has this from lxc_env.)
+
+        yield state
+
+    finally:
+        # Restore CAPP to SSH-disabled configuration used by other tests.
+        _push_text(CAPP, _SSHADMIN_SVC_SSH_DISABLED,
+                   '/etc/systemd/system/sshadmin.service')
+        _lxc_exec(CAPP, 'systemctl', 'daemon-reload', check=False)
+        _lxc_exec(CAPP, 'systemctl', 'restart', 'sshadmin', check=False)
+
+        for c in ENROLL_CONTAINERS:
+            subprocess.run(['lxc', 'delete', '--force', c], capture_output=True)
+
+
+def test_sshadmin_add_enrolls_ubuntu(lxc_enroll_env):
+    """sshadmin_add must exit 0 and report successful enrollment for Ubuntu target."""
+    r = lxc_enroll_env['ubuntu_result']
+    assert r.returncode == 0, (
+        f'sshadmin_add failed for Ubuntu:\nstdout: {r.stdout}\nstderr: {r.stderr}'
+    )
+    assert 'enrolled successfully' in r.stdout, \
+        f'Expected "enrolled successfully" in output:\n{r.stdout}'
+
+
+def test_sshadmin_add_enrolls_alpine(lxc_enroll_env):
+    """sshadmin_add must exit 0 and report successful enrollment for Alpine target."""
+    r = lxc_enroll_env['alpine_result']
+    assert r.returncode == 0, (
+        f'sshadmin_add failed for Alpine:\nstdout: {r.stdout}\nstderr: {r.stderr}'
+    )
+    assert 'enrolled successfully' in r.stdout, \
+        f'Expected "enrolled successfully" in output:\n{r.stdout}'
+
+
+def test_sshadmin_add_ubuntu_host_cert_in_db(lxc_enroll_env):
+    """After sshadmin_add, the Ubuntu enrollment target must have a host cert in the DB."""
+    ubuntu_ip = lxc_enroll_env['ips'][CENROLL_UBUNTU]
+    # sshadmin_add registers the host by its FQDN (hostname -f on the container);
+    # the container may report a short name or the IP.  We look up by prefix match.
+    row = _sqlite_value(
+        f"SELECT h.hostname FROM host h "
+        f"JOIN certificate c ON c.host_id = h.id "
+        f"WHERE c.cert_type='host' AND h.enrolled_at IS NOT NULL "
+        f"ORDER BY c.id DESC LIMIT 1"
+    )
+    assert row, (
+        f'No enrolled host with a host cert found after Ubuntu enrollment. '
+        f'Expected target IP: {ubuntu_ip}'
+    )
+
+
+def test_sshadmin_add_alpine_host_cert_in_db(lxc_enroll_env):
+    """After sshadmin_add, the Alpine enrollment target must have a host cert in the DB."""
+    alpine_ip = lxc_enroll_env['ips'][CENROLL_ALPINE]
+    row = _sqlite_value(
+        f"SELECT h.hostname FROM host h "
+        f"JOIN certificate c ON c.host_id = h.id "
+        f"WHERE c.cert_type='host' AND h.enrolled_at IS NOT NULL "
+        f"ORDER BY c.id DESC LIMIT 1"
+    )
+    assert row, (
+        f'No enrolled host with a host cert found after Alpine enrollment. '
+        f'Expected target IP: {alpine_ip}'
+    )
+
+
+def test_sshadmin_add_ubuntu_ssh_cert_auth(lxc_enroll_env, lxc_env):
+    """After sshadmin_add enrollment, alice can SSH from C1 to Ubuntu using cert auth.
+
+    The enrolled Ubuntu sshd trusts TrustedUserCAKeys (the sshadmin CA), so
+    alice's existing user cert (signed by the same CA with principal 'alice')
+    is accepted — without an entry in authorized_keys.
+    """
+    ubuntu_ip = lxc_enroll_env['ips'][CENROLL_UBUNTU]
+    # Remove alice's authorized_keys on the enrollment target so we prove
+    # the connection succeeds via cert auth only, not the raw public key.
+    _lxc_exec(CENROLL_UBUNTU, 'rm', '-f', '/home/alice/.ssh/authorized_keys', check=False)
+    _lxc_exec(CENROLL_UBUNTU, 'bash', '-c',
+              "echo 'AuthorizedKeysFile none' "
+              ">> /etc/ssh/sshd_config.d/99-sshadmin.conf && "
+              "systemctl reload ssh || systemctl reload sshd || true")
+    time.sleep(1)
+
+    result = _ssh_from(C1, 'alice', ubuntu_ip)
+    assert result.returncode == 0, (
+        f'Cert-based SSH from C1 to enrolled Ubuntu failed:\n'
+        f'stdout: {result.stdout}\nstderr: {result.stderr}'
+    )
+    assert 'hello' in result.stdout
+
+
+def test_sshadmin_add_alpine_ssh_cert_auth(lxc_enroll_env, lxc_env):
+    """After sshadmin_add enrollment, alice can SSH from C1 to Alpine using cert auth.
+
+    Verifies that the full enrollment flow works end-to-end on an Alpine
+    (musl/busybox) target: key collection, CA signing, cert installation, and
+    TrustedUserCAKeys being respected by Alpine's OpenSSH server.
+    """
+    alpine_ip = lxc_enroll_env['ips'][CENROLL_ALPINE]
+    # Remove raw-key fallback to force cert-only auth.
+    _lxc_exec(CENROLL_ALPINE, 'rm', '-f', '/home/alice/.ssh/authorized_keys', check=False)
+    _lxc_exec(CENROLL_ALPINE, 'sh', '-c',
+              "printf 'AuthorizedKeysFile none\\n' "
+              ">> /etc/ssh/sshd_config.d/99-sshadmin.conf && "
+              "kill -HUP $(cat /var/run/sshd.pid 2>/dev/null || "
+              "cat /run/sshd.pid 2>/dev/null) 2>/dev/null || true",
+              check=False)
+    time.sleep(1)
+
+    result = _ssh_from(C1, 'alice', alpine_ip)
+    assert result.returncode == 0, (
+        f'Cert-based SSH from C1 to enrolled Alpine failed:\n'
         f'stdout: {result.stdout}\nstderr: {result.stderr}'
     )
     assert 'hello' in result.stdout

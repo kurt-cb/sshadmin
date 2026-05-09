@@ -365,6 +365,7 @@ _CA_SETUP_ALLOWED_ENDPOINTS = {
     'api_enroll_script', 'api_enroll_host',
     'api_cert_install_data', 'api_cert_install_script',
     'api_cert_user', 'api_cert_host',
+    'download_sshadmin_add',
 }
 
 
@@ -1324,6 +1325,17 @@ def api_cert_host(hostname):
     return Response(cert.certificate_data.strip() + '\n', mimetype='text/plain; charset=utf-8')
 
 
+@app.route('/download/sshadmin_add')
+def download_sshadmin_add():
+    """Download the sshadmin_add enrollment helper script."""
+    ssh_host = request.host.split(':')[0]
+    ssh_port = app.config.get('SSHADMIN_SSH_PORT',
+                              int(os.environ.get('SSHADMIN_SSH_PORT', 2222)))
+    script = render_template('sshadmin_add.sh', ssh_host=ssh_host, ssh_port=ssh_port)
+    return Response(script, mimetype='text/x-shellscript; charset=utf-8',
+                    headers={'Content-Disposition': 'attachment; filename=sshadmin_add'})
+
+
 def _ssh_get_cert(subject: str):
     """Look up the latest valid cert for subject (hostname tried first, then username)."""
     with app.app_context():
@@ -1424,6 +1436,184 @@ def api_challenge_response():
         'username': challenge.user.username,
         'host': host_result,
     })
+
+
+def _do_issue_host_cert(host, requester_id, valid_days=365):
+    """Issue a host certificate, persist it, and return certificate_data.
+
+    Caller is responsible for verifying authentication and authorization
+    before calling this function — it performs no auth checks of its own.
+    """
+    with tempfile.NamedTemporaryFile(mode='w', delete=False, suffix='.pub') as f:
+        f.write(host.public_key)
+        tmp = f.name
+    try:
+        cert_data, serial = cert_gen.generate_host_certificate(tmp, host.hostname, valid_days)
+    finally:
+        os.unlink(tmp)
+    cert = Certificate(
+        cert_type='host', host_id=host.id, public_key=host.public_key,
+        serial=serial,
+        valid_from=datetime.utcnow(),
+        valid_until=datetime.utcnow() + timedelta(days=valid_days),
+        created_by_id=requester_id, certificate_data=cert_data,
+    )
+    cert.issue_install_token()
+    db.session.add(cert)
+    return cert_data
+
+
+def _do_issue_user_cert(sshuser, requester_id, principals=None, valid_days=365):
+    """Issue a user certificate, persist it, and return certificate_data.
+
+    Caller is responsible for verifying authentication and authorization
+    before calling this function — it performs no auth checks of its own.
+    """
+    if not principals:
+        principals = [sshuser.username]
+    with tempfile.NamedTemporaryFile(mode='w', delete=False, suffix='.pub') as f:
+        f.write(sshuser.public_key)
+        tmp = f.name
+    try:
+        cert_data, serial = cert_gen.generate_user_certificate(
+            tmp, sshuser.username, valid_days, principals)
+    finally:
+        os.unlink(tmp)
+    cert = Certificate(
+        cert_type='user', user_id=sshuser.id, public_key=sshuser.public_key,
+        serial=serial,
+        valid_from=datetime.utcnow(),
+        valid_until=datetime.utcnow() + timedelta(days=valid_days),
+        created_by_id=requester_id, certificate_data=cert_data,
+    )
+    cert.issue_install_token()
+    db.session.add(cert)
+    return cert_data
+
+
+def _ssh_add_machine(requester_user_id: int, data: dict) -> dict:
+    """Process an add_machine request from the sshadmin_add script.
+
+    Security model
+    --------------
+    Authentication: the caller reaches this function only through _serve_exec,
+    which is invoked after paramiko successfully verifies the client's SSH
+    private key against User.public_key in the database — the same proof-of-
+    ownership as the web challenge-response flow, just using SSH's built-in
+    key-exchange rather than an explicit nonce signature.
+
+    Authorization:
+    - requester must be a fully-registered (completed) account.
+    - Existing enrolled hosts may only be re-enrolled by an owner or admin;
+      a new host is automatically created with the requester as owner.
+    - User certs: if the SSH user already exists, only the creator or an admin
+      may re-issue. New SSH users are auto-created with the requester as creator.
+    """
+    with app.app_context():
+        requester = User.query.get(requester_user_id)
+        if not requester or requester.completed_at is None:
+            return {'ok': False, 'error': 'valid registered account required'}
+
+        hostname = (data.get('hostname') or '').strip()
+        host_key = (data.get('host_key') or '').strip()
+        username = (data.get('user') or '').strip()
+        user_key = (data.get('user_key') or '').strip()
+        valid_days = max(1, min(int(data.get('valid_days', 365)), 3650))
+
+        if not all([hostname, host_key, username, user_key]):
+            return {'ok': False, 'error': 'hostname, host_key, user, user_key are required'}
+
+        if not host_key.startswith(ALLOWED_HOST_KEY_TYPE + ' '):
+            return {'ok': False, 'error': f'host key must be {ALLOWED_HOST_KEY_TYPE}'}
+
+        user_key_type = user_key.split()[0] if user_key.split() else ''
+        if user_key_type not in ALLOWED_USER_KEY_TYPES:
+            return {'ok': False,
+                    'error': f'user key type {user_key_type!r} not allowed; '
+                             f'accepted: {", ".join(ALLOWED_USER_KEY_TYPES)}'}
+
+        norm_host_key = ' '.join(host_key.split()[:2])
+        norm_user_key = ' '.join(user_key.split()[:2])
+
+        # ── Host ──────────────────────────────────────────────────────────────
+        # Identify by public key so aliases (IPs, multiple DNS names) all map
+        # to the same record, regardless of the hostname reported by the remote.
+        host = next(
+            (h for h in Host.query.filter(Host.public_key.isnot(None)).all()
+             if _pubkey_match(h.public_key, host_key)),
+            None,
+        )
+        if host is None:
+            host = Host.query.filter_by(hostname=hostname).first()
+
+        if host is None:
+            host = Host(
+                hostname=hostname,
+                description=f'Added via sshadmin_add by {requester.username}',
+                created_by_id=requester.id,
+                public_key=norm_host_key,
+                enrolled_at=datetime.utcnow(),
+            )
+            host.owners.append(requester)
+            db.session.add(host)
+        else:
+            # Host already exists — requester must be an owner or admin
+            if not requester.is_admin and requester not in host.owners:
+                return {
+                    'ok': False,
+                    'error': (f'host {host.hostname!r} is already enrolled by another user; '
+                              'ask them to share access or contact an admin'),
+                }
+            host.public_key = norm_host_key
+            host.enrolled_at = datetime.utcnow()
+            host.enrollment_token = None
+            host.enrollment_expires_at = None
+
+        db.session.flush()
+
+        # ── SSH user ──────────────────────────────────────────────────────────
+        sshuser = next(
+            (su for su in SSHUser.query.filter_by(username=username).all()
+             if _pubkey_match(su.public_key, user_key)),
+            None,
+        )
+        if sshuser is None:
+            sshuser = SSHUser(
+                username=username,
+                public_key=norm_user_key,
+                description=f'Added via sshadmin_add from {hostname}',
+                created_by_id=requester.id,
+            )
+            db.session.add(sshuser)
+            db.session.flush()
+        else:
+            # SSH user already exists — only the creator or an admin may re-issue
+            if not requester.is_admin and sshuser.created_by_id != requester.id:
+                return {
+                    'ok': False,
+                    'error': (f'SSH user {username!r} was created by another user; '
+                              'ask them to issue the certificate or contact an admin'),
+                }
+
+        try:
+            host_cert = _do_issue_host_cert(host, requester.id, valid_days)
+            user_cert = _do_issue_user_cert(sshuser, requester.id, [username], valid_days)
+            db.session.commit()
+        except Exception as exc:
+            db.session.rollback()
+            return {'ok': False, 'error': str(exc)}
+
+        ca_pubkey = ''
+        if os.path.exists(cert_gen.ca_pubkey):
+            with open(cert_gen.ca_pubkey) as fh:
+                ca_pubkey = fh.read().strip()
+
+        return {
+            'ok': True,
+            'host_cert': host_cert.strip(),
+            'user_cert': user_cert.strip(),
+            'ca_pubkey': ca_pubkey,
+        }
 
 
 def _pubkey_match(a, b):
@@ -1707,7 +1897,8 @@ def _start_ssh_auth_server_if_enabled():
             app=app, db=db,
             models={'User': User, 'Challenge': Challenge,
                     'finalize_challenge': _finalize_consumed_challenge,
-                    'get_cert': _ssh_get_cert},
+                    'get_cert': _ssh_get_cert,
+                    'add_machine': _ssh_add_machine},
             host=bind, port=port,
             ca_key_path=cert_gen.ca_key if cert_gen.check_ca_keys() else None,
             host_principals=['sshadmin', public_host or '*'],

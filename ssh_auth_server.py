@@ -15,6 +15,7 @@ other SSH client that supports public-key auth — no exec command needed.
 from __future__ import annotations
 
 import base64
+import json as _json
 import os
 import socket
 import subprocess
@@ -321,9 +322,30 @@ def _serve_exec(channel, server_iface, app, models):
                 channel.sendall(cert_data.encode())
                 exit_status = 0
 
+        elif verb == 'add_machine':
+            if len(parts) != 2:
+                channel.send(b'Usage: ssh <user>@<host> add_machine <base64-json>\r\n')
+                exit_status = 2
+                return
+            try:
+                data = _json.loads(base64.b64decode(parts[1]))
+            except Exception:
+                channel.send(b'ERROR: invalid base64-JSON payload\r\n')
+                exit_status = 1
+                return
+            add_machine_fn = models.get('add_machine')
+            if add_machine_fn is None:
+                channel.send(b'ERROR: add_machine not available\r\n')
+                exit_status = 1
+                return
+            result = add_machine_fn(server_iface.user_id, data)
+            channel.sendall((_json.dumps(result) + '\n').encode())
+            exit_status = 0 if result.get('ok') else 1
+
         else:
             channel.send(b'Usage: ssh <user>@<host> auth <token>\r\n')
             channel.send(b'       ssh <user>@<host> get_cert <subject>\r\n')
+            channel.send(b'       ssh <user>@<host> add_machine <base64-json>\r\n')
             exit_status = 2
     finally:
         _close_channel(channel, exit_status=exit_status)
