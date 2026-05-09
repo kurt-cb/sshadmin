@@ -6,12 +6,10 @@ token, already-consumed token).
 """
 from __future__ import annotations
 
-import os
 import socket
 import threading
 import time
 from datetime import datetime, timedelta
-from pathlib import Path
 
 import paramiko
 import pytest
@@ -29,8 +27,13 @@ def ssh_server(app):
     host_key_path = str(_TESTDIR / 'ssh_host_key_test')
     sock = start_ssh_auth_server(
         app=sshadmin.app, db=sshadmin.db,
-        models={'User': sshadmin.User, 'Challenge': sshadmin.Challenge,
-                'finalize_challenge': sshadmin._finalize_consumed_challenge},
+        models={
+            'User': sshadmin.User,
+            'Challenge': sshadmin.Challenge,
+            'UserCredential': sshadmin.UserCredential,
+            'SSHKey': sshadmin.SSHKey,
+            'finalize_challenge': sshadmin._finalize_consumed_challenge,
+        },
         host='127.0.0.1', port=0,
         host_key_path=host_key_path,
     )
@@ -45,11 +48,6 @@ def ssh_server(app):
 # ---------- Helpers ----------
 
 def _load_pkey(key_path):
-    """Load a private key file as the right paramiko PKey subclass.
-
-    paramiko's `key_filename=` autodetection in SSHClient.connect is flaky for
-    OpenSSH-format ECDSA-P521 keys; loading explicitly avoids the issue.
-    """
     for cls in (paramiko.ECDSAKey, paramiko.Ed25519Key, paramiko.RSAKey):
         try:
             return cls.from_private_key_file(key_path)
@@ -59,10 +57,7 @@ def _load_pkey(key_path):
 
 
 def _ssh_send_token(host, port, username, key_path, token, *, recv_timeout=5.0):
-    """Open an SSH session, paste the token, and return the server's text output.
-
-    Returns the bytes the server sent back after we wrote the token.
-    """
+    """Open an SSH session, paste the token, and return the server's text output."""
     pkey = _load_pkey(key_path)
     client = paramiko.SSHClient()
     client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
@@ -76,7 +71,6 @@ def _ssh_send_token(host, port, username, key_path, token, *, recv_timeout=5.0):
         chan = client.invoke_shell()
         chan.settimeout(recv_timeout)
 
-        # Wait for the welcome banner / Token: prompt to arrive.
         seen = bytearray()
         deadline = time.monotonic() + recv_timeout
         while time.monotonic() < deadline:
@@ -88,7 +82,6 @@ def _ssh_send_token(host, port, username, key_path, token, *, recv_timeout=5.0):
 
         chan.send((token + '\r').encode())
 
-        # Drain response until channel closes or timeout.
         deadline = time.monotonic() + recv_timeout
         out = bytearray()
         while time.monotonic() < deadline:
@@ -98,7 +91,6 @@ def _ssh_send_token(host, port, username, key_path, token, *, recv_timeout=5.0):
                     break
                 out += chunk
             elif chan.exit_status_ready() or chan.closed:
-                # final drain
                 if chan.recv_ready():
                     out += chan.recv(4096)
                 break
@@ -110,7 +102,6 @@ def _ssh_send_token(host, port, username, key_path, token, *, recv_timeout=5.0):
 
 
 def _wait_for_consumed(token, timeout=2.0):
-    """Poll the DB until the challenge with `token` is consumed (or timeout)."""
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
         with sshadmin.app.app_context():
@@ -123,10 +114,12 @@ def _wait_for_consumed(token, timeout=2.0):
 
 # ---------- Tests ----------
 
-def test_happy_path_register_via_ssh(client, keypair, sign, ssh_server):
-    """Begin a register flow in the browser, finish it via SSH."""
-    r = client.post('/register', data={'username': 'alice', 'public_key': keypair['public_key']})
-    assert r.status_code == 302
+def test_register_via_ssh_interactive_is_blocked(client, keypair, ssh_server):
+    """Registration via SSH interactive shell is rejected — must use the curl script."""
+    client.post('/register', data={
+        'username': 'alice', 'unix_username': 'alice',
+        'public_key': keypair['public_key'],
+    })
     with sshadmin.app.app_context():
         ch = latest_challenge('register')
         token = ch.token
@@ -135,18 +128,13 @@ def test_happy_path_register_via_ssh(client, keypair, sign, ssh_server):
         ssh_server['host'], ssh_server['port'],
         'alice', keypair['private_path'], token,
     )
-    assert b'OK: challenge consumed for alice' in out
+    assert b'registration must be completed via the auth script' in out
 
-    consumed = _wait_for_consumed(token)
-    assert consumed is not None
-
-    # The browser polling endpoint should now finish the login.
-    r = client.get(f'/api/auth_status/{token}')
-    assert r.json['status'] == 'completed'
-
-    # Auto-created SSHUser from the registration finalizer ran.
+    # The challenge is consumed (prevents replay) but user is NOT registered.
+    _wait_for_consumed(token)
     with sshadmin.app.app_context():
-        assert sshadmin.SSHUser.query.filter_by(username='alice').count() == 1
+        u = sshadmin.User.query.filter_by(username='alice').first()
+        assert u.completed_at is None
 
 
 def test_happy_path_login_via_ssh(client, keypair, sign, ssh_server):
@@ -200,8 +188,10 @@ def test_wrong_key_auth_fails(client, keypair, sign, keypair_ed25519, ssh_server
 
 def test_pending_user_with_expired_challenge_auth_fails(client, keypair, ssh_server):
     """A pending user whose register challenge has expired cannot SSH-auth."""
-    client.post('/register', data={'username': 'alice', 'public_key': keypair['public_key']})
-    # Mark the challenge as expired (so the user has no active register window).
+    client.post('/register', data={
+        'username': 'alice', 'unix_username': 'alice',
+        'public_key': keypair['public_key'],
+    })
     with sshadmin.app.app_context():
         ch = latest_challenge('register')
         ch.expires_at = datetime.utcnow() - timedelta(minutes=1)
@@ -214,7 +204,6 @@ def test_pending_user_with_expired_challenge_auth_fails(client, keypair, ssh_ser
 
 def test_cross_user_token_rejected(client, keypair, sign, keypair_ed25519, ssh_server):
     """Authenticated as alice, but pasted bob's token -> error, no consume."""
-    # Alice and Bob both register normally first.
     register_via_api(client, sign, keypair['public_key'], username='alice')
     client.get('/logout')
     register_via_api(
@@ -224,12 +213,10 @@ def test_cross_user_token_rejected(client, keypair, sign, keypair_ed25519, ssh_s
     )
     client.get('/logout')
 
-    # Bob starts a fresh login challenge.
     client.post('/login', data={'username': 'bob'})
     with sshadmin.app.app_context():
         bob_token = latest_challenge('login').token
 
-    # Alice authenticates via SSH and tries to consume bob's token.
     out = _ssh_send_token(
         ssh_server['host'], ssh_server['port'],
         'alice', keypair['private_path'], bob_token,
@@ -297,7 +284,6 @@ def test_await_page_renders_ssh_option(client, keypair, sign):
     assert 'TeraTerm' in body
     assert 'ssh -p ' in body
     assert 'alice@' in body
-    # The new exec one-liner form ('auth TOKEN') is also shown.
     assert 'auth ' in body
 
 
@@ -317,7 +303,6 @@ def _ssh_exec_auth(host, port, username, key_path, token, *, recv_timeout=5.0):
         chan = client.get_transport().open_session()
         chan.settimeout(recv_timeout)
         chan.exec_command(f'auth {token}')
-        # Wait until exit status is available or timeout.
         deadline = time.monotonic() + recv_timeout
         out = bytearray()
         while time.monotonic() < deadline:
@@ -334,7 +319,7 @@ def _ssh_exec_auth(host, port, username, key_path, token, *, recv_timeout=5.0):
 
 
 def test_ssh_exec_auth_happy_path(client, keypair, sign, ssh_server):
-    """`ssh user@host auth TOKEN` consumes the challenge in one shot."""
+    """`ssh user@host auth TOKEN` consumes a login challenge in one shot."""
     register_via_api(client, sign, keypair['public_key'], username='alice')
     client.get('/logout')
 
@@ -354,6 +339,23 @@ def test_ssh_exec_auth_happy_path(client, keypair, sign, ssh_server):
     assert consumed is not None
     r = client.get(f'/api/auth_status/{token}')
     assert r.json['status'] == 'completed'
+
+
+def test_ssh_exec_register_blocked(client, keypair, ssh_server):
+    """Registration challenges cannot be consumed via SSH exec — must use curl script."""
+    client.post('/register', data={
+        'username': 'alice', 'unix_username': 'alice',
+        'public_key': keypair['public_key'],
+    })
+    with sshadmin.app.app_context():
+        token = latest_challenge('register').token
+
+    out, status = _ssh_exec_auth(
+        ssh_server['host'], ssh_server['port'],
+        'alice', keypair['private_path'], token,
+    )
+    assert status == 1
+    assert b'auth script' in out
 
 
 def test_ssh_exec_usage_error(client, keypair, sign, ssh_server):

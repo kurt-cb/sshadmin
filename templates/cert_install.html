@@ -39,7 +39,7 @@
     </button>
     <pre class="cmd m-0" id="oneliner">{{ one_liner }}</pre>
     <p class="text-muted small mt-2 mb-0">
-      Writes the cert to <code>/etc/ssh/ssh_host_ecdsa_key-cert.pub</code>,
+      Writes the cert to <code>/etc/ssh/ssh_host_sshadmin_ecdsa_key-cert.pub</code>,
       adds a <code>HostCertificate</code> drop-in under
       <code>/etc/ssh/sshd_config.d/</code>, and reloads sshd.
     </p>
@@ -72,19 +72,19 @@
     </p>
     <ol class="small">
       <li>Download the cert:
-        <pre class="cmd m-0">curl -fsSL "{{ install_url|replace('install/script', 'install/data') }}" -o /etc/ssh/ssh_host_ecdsa_key-cert.pub
-sudo chmod 0644 /etc/ssh/ssh_host_ecdsa_key-cert.pub</pre>
+        <pre class="cmd m-0">curl -fsSL "{{ install_url|replace('install/script', 'install/data') }}" -o /etc/ssh/ssh_host_sshadmin_ecdsa_key-cert.pub
+sudo chmod 0644 /etc/ssh/ssh_host_sshadmin_ecdsa_key-cert.pub</pre>
       </li>
       <li>Add this line to <code>/etc/ssh/sshd_config</code> (or a drop-in under
         <code>/etc/ssh/sshd_config.d/</code>):
-        <pre class="cmd m-0">HostCertificate /etc/ssh/ssh_host_ecdsa_key-cert.pub</pre>
+        <pre class="cmd m-0">HostCertificate /etc/ssh/ssh_host_sshadmin_ecdsa_key-cert.pub</pre>
       </li>
       <li>Reload sshd:
         <pre class="cmd m-0">sudo systemctl reload ssh   # or: sudo systemctl reload sshd</pre>
       </li>
       <li>Verify:
         <pre class="cmd m-0">sudo sshd -T | grep -i hostcertificate
-ssh-keygen -L -f /etc/ssh/ssh_host_ecdsa_key-cert.pub</pre>
+ssh-keygen -L -f /etc/ssh/ssh_host_sshadmin_ecdsa_key-cert.pub</pre>
       </li>
     </ol>
     {% else %}
@@ -95,17 +95,17 @@ ssh-keygen -L -f /etc/ssh/ssh_host_ecdsa_key-cert.pub</pre>
     <ol class="small">
       <li>Download the cert next to your matching private key:
         <pre class="cmd m-0">curl -fsSL "{{ install_url|replace('install/script', 'install/data') }}" \
-  -o ~/.ssh/id_ecdsa-cert.pub   # use the basename of your key
-chmod 0644 ~/.ssh/id_ecdsa-cert.pub</pre>
+  -o ~/.ssh/id_sshadmin-cert.pub   # or id_ecdsa-cert.pub if using an existing key
+chmod 0644 ~/.ssh/id_sshadmin-cert.pub</pre>
       </li>
       <li>(Optional) If you want to point ssh at a non-standard cert path,
         add to <code>~/.ssh/config</code>:
         <pre class="cmd m-0">Host my-server
-    IdentityFile ~/.ssh/id_ecdsa
-    CertificateFile ~/.ssh/id_ecdsa-cert.pub</pre>
+    IdentityFile ~/.ssh/id_sshadmin
+    CertificateFile ~/.ssh/id_sshadmin-cert.pub</pre>
       </li>
       <li>Verify the cert and its principals:
-        <pre class="cmd m-0">ssh-keygen -L -f ~/.ssh/id_ecdsa-cert.pub</pre>
+        <pre class="cmd m-0">ssh-keygen -L -f ~/.ssh/id_sshadmin-cert.pub</pre>
       </li>
     </ol>
     {% endif %}

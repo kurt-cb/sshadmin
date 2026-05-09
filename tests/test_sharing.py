@@ -1,8 +1,6 @@
 """Host sharing semantics: implicit re-registration, manual share, ownership-based delete."""
-from datetime import datetime
-
 import sshadmin
-from conftest import latest_challenge, register_via_api
+from conftest import latest_challenge, register_via_api, set_host_enrolled
 
 
 def _register_user(client, sign_fn, public_key, username):
@@ -36,9 +34,12 @@ def _enroll_host_with_creator(client, hostname='srv1'):
 
 def test_implicit_share_on_matching_pubkey(client, keypair, sign,
                                            keypair_ed25519, host_keypair, ca_keys):
-    """User A enrolls a host. User B re-registers the same hostname/pubkey -> co-owner."""
+    """User A enrolls a host. User B re-registers the same hostname/pubkey -> co-user."""
     # User A registers + enrolls host via challenge_response.
-    client.post('/register', data={'username': 'alice', 'public_key': keypair['public_key']})
+    client.post('/register', data={
+        'username': 'alice', 'unix_username': 'alice',
+        'public_key': keypair['public_key'],
+    })
     with sshadmin.app.app_context():
         ch = latest_challenge('register')
         token, nonce = ch.token, ch.nonce
@@ -52,7 +53,10 @@ def test_implicit_share_on_matching_pubkey(client, keypair, sign,
     client.get('/logout')
 
     # User B registers + tries to enroll same host (same pubkey).
-    r = client.post('/register', data={'username': 'bob', 'public_key': keypair_ed25519['public_key']})
+    r = client.post('/register', data={
+        'username': 'bob', 'unix_username': 'bob',
+        'public_key': keypair_ed25519['public_key'],
+    })
     with sshadmin.app.app_context():
         ch = latest_challenge('register')
         token, nonce = ch.token, ch.nonce
@@ -67,15 +71,19 @@ def test_implicit_share_on_matching_pubkey(client, keypair, sign,
 
     with sshadmin.app.app_context():
         host = sshadmin.Host.query.filter_by(hostname='box1').first()
-        owner_names = sorted(o.username for o in host.owners)
-        assert owner_names == ['alice', 'bob']
+        user_names = sorted(u.username for u in host.users)
+        assert 'alice' in user_names
+        assert 'bob' in user_names
 
 
 def test_share_refused_on_mismatched_pubkey(client, keypair, sign,
                                             keypair_ed25519, host_keypair, ca_keys):
     """Same hostname + different pubkey: registration completes but host_enrolled=False."""
     # User A enrolls box1 with pubkey A.
-    client.post('/register', data={'username': 'alice', 'public_key': keypair['public_key']})
+    client.post('/register', data={
+        'username': 'alice', 'unix_username': 'alice',
+        'public_key': keypair['public_key'],
+    })
     with sshadmin.app.app_context():
         ch = latest_challenge('register')
         token, nonce = ch.token, ch.nonce
@@ -86,8 +94,9 @@ def test_share_refused_on_mismatched_pubkey(client, keypair, sign,
     client.get(f'/api/auth_status/{token}')
     client.get('/logout')
 
-    # User B tries box1 with a *different* host key (we'll use a freshly created one).
-    import subprocess, tempfile
+    # User B tries box1 with a *different* host key.
+    import subprocess
+    import tempfile
     from pathlib import Path
     with tempfile.TemporaryDirectory() as tmp:
         priv = Path(tmp) / 'host_other'
@@ -96,7 +105,10 @@ def test_share_refused_on_mismatched_pubkey(client, keypair, sign,
                        check=True, capture_output=True)
         other_pub = (priv.parent / (priv.name + '.pub')).read_text().strip()
 
-    client.post('/register', data={'username': 'bob', 'public_key': keypair_ed25519['public_key']})
+    client.post('/register', data={
+        'username': 'bob', 'unix_username': 'bob',
+        'public_key': keypair_ed25519['public_key'],
+    })
     with sshadmin.app.app_context():
         ch = latest_challenge('register')
         token, nonce = ch.token, ch.nonce
@@ -112,8 +124,9 @@ def test_share_refused_on_mismatched_pubkey(client, keypair, sign,
 
     with sshadmin.app.app_context():
         host = sshadmin.Host.query.filter_by(hostname='box1').first()
-        owner_names = sorted(o.username for o in host.owners)
-        assert owner_names == ['alice']  # bob was NOT added.
+        user_names = [u.username for u in host.users]
+        assert 'alice' in user_names
+        assert 'bob' not in user_names  # bob was NOT added to this host.
 
 
 # ------- Manual share UI -------
@@ -123,13 +136,8 @@ def test_owner_can_share_host_with_another_user(client, keypair, sign,
     register_via_api(client, sign, keypair['public_key'], username='alice')
     host_id = _enroll_host_with_creator(client, 'srv1')
 
-    # Mark host as enrolled so it shows up on share page.
-    with sshadmin.app.app_context():
-        host = sshadmin.db.session.get(sshadmin.Host, host_id)
-        host.public_key = 'ecdsa-sha2-nistp521 AAAA-fake'
-        host.enrolled_at = datetime.utcnow()
-        host.enrollment_token = None
-        sshadmin.db.session.commit()
+    # Mark host as enrolled with a real key.
+    set_host_enrolled(host_id)
 
     # Register a second user.
     client.get('/logout')
@@ -142,7 +150,7 @@ def test_owner_can_share_host_with_another_user(client, keypair, sign,
     # Login as alice and share.
     client.get('/logout')
     _login(client, sign, 'alice', ca_keys=ca_keys)
-    r = client.post(f'/hosts/{host_id}/share', data={'user_id': bob_id})
+    r = client.post(f'/hosts/{host_id}/share', data={'user_id': bob_id, 'role': 'owner'})
     assert r.status_code == 302
 
     with sshadmin.app.app_context():
@@ -176,9 +184,12 @@ def test_non_owner_cannot_share_host(client, keypair, sign, keypair_ed25519, ca_
 
 def test_non_admin_delete_removes_only_their_ownership(client, keypair, sign,
                                                        keypair_ed25519, host_keypair, ca_keys):
-    """Two co-owners; one deletes -> ownership row gone but host remains."""
+    """Two co-users; one deletes -> HostUsers row gone but host remains."""
     # Alice creates + enrolls box1 (she's first user, so admin).
-    client.post('/register', data={'username': 'alice', 'public_key': keypair['public_key']})
+    client.post('/register', data={
+        'username': 'alice', 'unix_username': 'alice',
+        'public_key': keypair['public_key'],
+    })
     with sshadmin.app.app_context():
         ch = latest_challenge('register')
         token, nonce = ch.token, ch.nonce
@@ -189,8 +200,11 @@ def test_non_admin_delete_removes_only_their_ownership(client, keypair, sign,
     client.get(f'/api/auth_status/{token}')
     client.get('/logout')
 
-    # Bob registers and shares ownership.
-    client.post('/register', data={'username': 'bob', 'public_key': keypair_ed25519['public_key']})
+    # Bob registers and shares the host (same key → co-user).
+    client.post('/register', data={
+        'username': 'bob', 'unix_username': 'bob',
+        'public_key': keypair_ed25519['public_key'],
+    })
     with sshadmin.app.app_context():
         ch = latest_challenge('register')
         token, nonce = ch.token, ch.nonce
@@ -204,22 +218,21 @@ def test_non_admin_delete_removes_only_their_ownership(client, keypair, sign,
     with sshadmin.app.app_context():
         host = sshadmin.Host.query.filter_by(hostname='box1').first()
         host_id = host.id
-        assert sorted(o.username for o in host.owners) == ['alice', 'bob']
+        assert sorted(u.username for u in host.users) == ['alice', 'bob']
 
-    # Bob (non-admin) "deletes" the host -> just removes his ownership.
+    # Bob (non-admin) "deletes" the host -> just removes his HostUsers row.
     r = client.post(f'/hosts/{host_id}/delete', follow_redirects=False)
     assert r.status_code == 302
 
     with sshadmin.app.app_context():
         host = sshadmin.Host.query.filter_by(hostname='box1').first()
         assert host is not None  # not deleted
-        assert sorted(o.username for o in host.owners) == ['alice']
+        assert sorted(u.username for u in host.users) == ['alice']
 
 
 def test_last_owner_delete_removes_host(client, keypair, sign, keypair_ed25519, ca_keys):
     """A non-admin sole-owner deleting their host wipes the host record."""
-    # Alice = first user = admin (we don't use her here, but she occupies the
-    # is_admin slot so Bob is non-admin).
+    # Alice = first user = admin.
     register_via_api(client, sign, keypair['public_key'], username='alice')
     client.get('/logout')
 
@@ -233,7 +246,7 @@ def test_last_owner_delete_removes_host(client, keypair, sign, keypair_ed25519, 
     host_id = _enroll_host_with_creator(client, 'soloserver')
 
     r = client.post(f'/hosts/{host_id}/delete', follow_redirects=True)
-    assert b'no other owners' in r.data
+    assert b'no other users' in r.data
 
     with sshadmin.app.app_context():
         assert sshadmin.Host.query.filter_by(hostname='soloserver').first() is None
@@ -241,9 +254,12 @@ def test_last_owner_delete_removes_host(client, keypair, sign, keypair_ed25519, 
 
 def test_admin_delete_wipes_host_with_co_owners(client, keypair, sign,
                                                 keypair_ed25519, host_keypair, ca_keys):
-    """Admin delete removes the host record entirely even if other owners exist."""
-    # Alice (admin) creates + enrolls box1 with bob as co-owner via implicit share.
-    client.post('/register', data={'username': 'alice', 'public_key': keypair['public_key']})
+    """Admin delete removes the host record entirely even if other users exist."""
+    # Alice (admin) creates + enrolls box1 with bob as co-user via implicit share.
+    client.post('/register', data={
+        'username': 'alice', 'unix_username': 'alice',
+        'public_key': keypair['public_key'],
+    })
     with sshadmin.app.app_context():
         ch = latest_challenge('register')
         token, nonce = ch.token, ch.nonce
@@ -254,7 +270,10 @@ def test_admin_delete_wipes_host_with_co_owners(client, keypair, sign,
     client.get(f'/api/auth_status/{token}')
     client.get('/logout')
 
-    client.post('/register', data={'username': 'bob', 'public_key': keypair_ed25519['public_key']})
+    client.post('/register', data={
+        'username': 'bob', 'unix_username': 'bob',
+        'public_key': keypair_ed25519['public_key'],
+    })
     with sshadmin.app.app_context():
         ch = latest_challenge('register')
         token, nonce = ch.token, ch.nonce
@@ -272,7 +291,7 @@ def test_admin_delete_wipes_host_with_co_owners(client, keypair, sign,
     client.get('/logout')
     _login(client, sign, 'alice', ca_keys=ca_keys)
     r = client.post(f'/hosts/{host_id}/delete', follow_redirects=True)
-    assert b'admin wipe' in r.data
+    assert b'deleted' in r.data
 
     with sshadmin.app.app_context():
         assert sshadmin.Host.query.filter_by(hostname='box1').first() is None

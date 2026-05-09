@@ -140,7 +140,10 @@ def test_totp_endpoint_requires_totp_enabled(client, keypair, sign):
 
 def test_totp_cannot_be_used_for_registration(client, keypair, sign):
     """Registration challenges only accept signature responses; TOTP isn't enrolled yet."""
-    client.post('/register', data={'username': 'alice', 'public_key': keypair['public_key']})
+    client.post('/register', data={
+        'username': 'alice', 'unix_username': 'alice',
+        'public_key': keypair['public_key'],
+    })
     with sshadmin.app.app_context():
         ch = latest_challenge('register')
         token = ch.token

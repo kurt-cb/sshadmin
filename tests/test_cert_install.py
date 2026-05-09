@@ -14,10 +14,21 @@ from conftest import register_via_api
 
 # ---------- Helpers ----------
 
-def _issue_user_cert(client, ssh_user_id, valid_days=1):
+def _alice_credential_id():
+    """Return the first UserCredential id for alice."""
+    return (
+        sshadmin.UserCredential.query
+        .join(sshadmin.User)
+        .filter(sshadmin.User.username == 'alice')
+        .first()
+        .id
+    )
+
+
+def _issue_user_cert(client, credential_id, valid_days=1):
     """Drive the issue-user-cert form and return the resulting Certificate row."""
     r = client.post('/certificates/issue/user', data={
-        'user_id': ssh_user_id,
+        'credential_id': credential_id,
         'valid_days': str(valid_days),
         'principals': 'alice',
     }, follow_redirects=False)
@@ -47,49 +58,47 @@ def _issue_host_cert(client, host_id, valid_days=1):
 # ---------- Cert install page + endpoints ----------
 
 def test_cert_issued_redirects_to_install_page(client, keypair, sign, ca_keys):
-    """After issuing a user cert, we should land on the install page (not /certificates)."""
-    register_via_api(client, sign, keypair['public_key'], username='alice')
+    """After issuing a user cert, we should land on the install page."""
+    register_via_api(client, sign, keypair['public_key'], username='alice',
+                     unix_username='alice')
 
     with sshadmin.app.app_context():
-        ssh_user = sshadmin.SSHUser.query.filter_by(username='alice').first()
-        assert ssh_user is not None
-        ssh_user_id = ssh_user.id
+        cred_id = _alice_credential_id()
 
     r = client.post('/certificates/issue/user', data={
-        'user_id': ssh_user_id, 'valid_days': '1', 'principals': 'alice',
+        'credential_id': cred_id, 'valid_days': '1', 'principals': 'alice',
     })
     assert r.status_code == 302
     assert '/install' in r.headers['Location']
 
 
 def test_install_page_renders_one_liner(client, keypair, sign, ca_keys):
-    register_via_api(client, sign, keypair['public_key'], username='alice')
+    register_via_api(client, sign, keypair['public_key'], username='alice',
+                     unix_username='alice')
     with sshadmin.app.app_context():
-        ssh_user_id = sshadmin.SSHUser.query.filter_by(username='alice').first().id
+        cred_id = _alice_credential_id()
 
-    cert = _issue_user_cert(client, ssh_user_id)
+    cert = _issue_user_cert(client, cred_id)
     r = client.get(f'/certificates/{cert.id}/install')
     assert r.status_code == 200
     body = r.data.decode()
-    # One-liner uses curl + the install token endpoint.
     assert 'curl -fsSL' in body
     assert '/api/cert/install/script' in body
     assert cert.install_token in body
 
 
 def test_install_data_endpoint_returns_cert_body(client, keypair, sign, ca_keys):
-    register_via_api(client, sign, keypair['public_key'], username='alice')
+    register_via_api(client, sign, keypair['public_key'], username='alice',
+                     unix_username='alice')
     with sshadmin.app.app_context():
-        ssh_user_id = sshadmin.SSHUser.query.filter_by(username='alice').first().id
+        cred_id = _alice_credential_id()
 
-    cert = _issue_user_cert(client, ssh_user_id)
+    cert = _issue_user_cert(client, cred_id)
     token = cert.install_token
 
     r = client.get(f'/api/cert/install/data?token={token}')
     assert r.status_code == 200
     body = r.data.decode().strip()
-    assert body.endswith('-cert-v01@openssh.com' if False else cert.certificate_data.split()[0][:5]) is False  # sanity
-    # Body should be the OpenSSH certificate text.
     assert body.startswith(('ecdsa-sha2-', 'ssh-ed25519', 'ssh-rsa'))
     assert '-cert-v01@openssh.com' in body
 
@@ -105,11 +114,12 @@ def test_install_data_no_token(client):
 
 
 def test_install_data_expired_token(client, keypair, sign, ca_keys):
-    register_via_api(client, sign, keypair['public_key'], username='alice')
+    register_via_api(client, sign, keypair['public_key'], username='alice',
+                     unix_username='alice')
     with sshadmin.app.app_context():
-        ssh_user_id = sshadmin.SSHUser.query.filter_by(username='alice').first().id
+        cred_id = _alice_credential_id()
 
-    cert = _issue_user_cert(client, ssh_user_id)
+    cert = _issue_user_cert(client, cred_id)
     token = cert.install_token
 
     with sshadmin.app.app_context():
@@ -122,26 +132,26 @@ def test_install_data_expired_token(client, keypair, sign, ca_keys):
 
 
 def test_install_script_endpoint_returns_bash(client, keypair, sign, ca_keys):
-    register_via_api(client, sign, keypair['public_key'], username='alice')
+    register_via_api(client, sign, keypair['public_key'], username='alice',
+                     unix_username='alice')
     with sshadmin.app.app_context():
-        ssh_user_id = sshadmin.SSHUser.query.filter_by(username='alice').first().id
+        cred_id = _alice_credential_id()
 
-    cert = _issue_user_cert(client, ssh_user_id)
+    cert = _issue_user_cert(client, cred_id)
     r = client.get(f'/api/cert/install/script?token={cert.install_token}')
     assert r.status_code == 200
     body = r.data.decode()
     assert body.startswith('#!/usr/bin/env bash')
     assert 'install/data' in body
     assert cert.install_token in body
-    # User-cert branch should reference ~/.ssh
     assert '~/.ssh' in body or '$SSH_DIR' in body or '${HOME}/.ssh' in body
 
 
 def test_install_script_distinguishes_user_vs_host(client, keypair, sign,
                                                     host_keypair, ca_keys):
     """Script generated for a host cert must reference the host paths."""
-    register_via_api(client, sign, keypair['public_key'], username='alice')
-    # Add a host directly via /api/enroll/host (admin-driven path).
+    register_via_api(client, sign, keypair['public_key'], username='alice',
+                     unix_username='alice')
     r = client.post('/hosts/add', data={'hostname': 'srv1'})
     assert r.status_code == 302
     with sshadmin.app.app_context():
@@ -164,11 +174,12 @@ def test_install_script_distinguishes_user_vs_host(client, keypair, sign,
 
 
 def test_download_cert_returns_data(client, keypair, sign, ca_keys):
-    register_via_api(client, sign, keypair['public_key'], username='alice')
+    register_via_api(client, sign, keypair['public_key'], username='alice',
+                     unix_username='alice')
     with sshadmin.app.app_context():
-        ssh_user_id = sshadmin.SSHUser.query.filter_by(username='alice').first().id
+        cred_id = _alice_credential_id()
 
-    cert = _issue_user_cert(client, ssh_user_id)
+    cert = _issue_user_cert(client, cred_id)
     r = client.get(f'/certificates/{cert.id}/download')
     assert r.status_code == 200
     assert r.headers['Content-Disposition'].startswith('attachment')
@@ -180,10 +191,11 @@ def test_install_script_round_trip_actually_writes_user_cert(client, keypair, si
                                                              monkeypatch):
     """Run the install script in a fake $HOME and verify the cert is placed
     next to the matching .pub."""
-    register_via_api(client, sign, keypair['public_key'], username='alice')
+    register_via_api(client, sign, keypair['public_key'], username='alice',
+                     unix_username='alice')
     with sshadmin.app.app_context():
-        ssh_user_id = sshadmin.SSHUser.query.filter_by(username='alice').first().id
-    cert = _issue_user_cert(client, ssh_user_id)
+        cred_id = _alice_credential_id()
+    cert = _issue_user_cert(client, cred_id)
 
     # Set up a fake ~/.ssh that contains only the registered pubkey.
     fake_home = tmp_path / 'home-alice'
@@ -192,22 +204,17 @@ def test_install_script_round_trip_actually_writes_user_cert(client, keypair, si
     pub_path = fake_ssh / 'id_ecdsa.pub'
     pub_path.write_text(keypair['public_key'] + '\n')
 
-    # Get the script from the API and write to a temp file.
     r = client.get(f'/api/cert/install/script?token={cert.install_token}')
     script_path = tmp_path / 'install.sh'
     script_path.write_text(r.data.decode())
     script_path.chmod(0o755)
 
-    # Patch the script to fetch the cert text from the test_client (the script
-    # tries to curl the running server, which doesn't exist in tests). Easier:
-    # just set CERT_DATA via a wrapper.
     cert_text = cert.certificate_data
     wrapper = tmp_path / 'wrapper.sh'
     wrapper.write_text(
         '#!/usr/bin/env bash\n'
         'set -euo pipefail\n'
         f'export HOME={fake_home}\n'
-        # Stub `curl` on PATH so it returns the cert text.
         f'mkdir -p {tmp_path}/bin\n'
         f'cat > {tmp_path}/bin/curl <<EOF\n'
         '#!/usr/bin/env bash\n'

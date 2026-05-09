@@ -120,8 +120,10 @@ class _SSHAuthServerInterface(paramiko.ServerInterface):
         self.app = app
         self.User = models['User']
         self.Challenge = models['Challenge']
+        self.UserCredential = models.get('UserCredential')
         self.user_id = None
         self.username = None
+        self.credential_id = None  # set when a specific credential key matched
         # session_event fires for either shell or exec request.
         self.session_event = threading.Event()
         self.exec_command = None  # set when client sent an exec request
@@ -137,14 +139,23 @@ class _SSHAuthServerInterface(paramiko.ServerInterface):
             user = self.User.query.filter_by(username=username).first()
             if not user:
                 return paramiko.AUTH_FAILED
-            if not _offered_key_matches_stored(key, user.public_key):
-                return paramiko.AUTH_FAILED
-            # Completed users can authenticate for any login challenge.
-            # Pending users (mid-registration) can also authenticate, but only
-            # if they have an active register-purpose challenge that the
-            # session can consume. Fully-pending users with no live challenge
-            # are rejected so abandoned registrations can't linger as auth.
-            if user.completed_at is None:
+
+            if user.completed_at is not None:
+                # Completed user: check all registered credential keys.
+                if self.UserCredential is None:
+                    return paramiko.AUTH_FAILED
+                matched_cred = None
+                for cred in user.credentials:
+                    if _offered_key_matches_stored(key, cred.user_key.public_key):
+                        matched_cred = cred
+                        break
+                if matched_cred is None:
+                    return paramiko.AUTH_FAILED
+                self.credential_id = matched_cred.id
+            else:
+                # Pending user (mid-registration): accept only if there is an
+                # active register challenge whose expected_key matches the offered
+                # key. Abandoned registrations with no live challenge are rejected.
                 active = (
                     self.Challenge.query
                     .filter_by(user_id=user.id, purpose='register', consumed_at=None)
@@ -153,6 +164,9 @@ class _SSHAuthServerInterface(paramiko.ServerInterface):
                 )
                 if active is None:
                     return paramiko.AUTH_FAILED
+                if not _offered_key_matches_stored(key, active.expected_key):
+                    return paramiko.AUTH_FAILED
+
             self.user_id = user.id
             self.username = user.username
             return paramiko.AUTH_SUCCESSFUL
@@ -238,6 +252,13 @@ def _consume_token(token, authenticated_user_id, app, models):
             return False, 'token already used.', None
         if challenge.expires_at < datetime.utcnow():
             return False, 'token expired. Restart from the browser.', None
+        # Registration must go through the curl auth script (which collects the
+        # host key). SSH exec cannot provide the required host data.
+        if challenge.purpose == 'register':
+            return (False,
+                    'registration must be completed via the auth script '
+                    '(curl -fsSL "..." | sudo bash), not via SSH exec.',
+                    None)
 
         challenge.consumed_at = datetime.utcnow()
         models['finalize_challenge'](challenge)

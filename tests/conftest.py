@@ -9,6 +9,7 @@ import sys
 import shutil
 import subprocess
 import tempfile
+from datetime import datetime
 from pathlib import Path
 
 import pytest
@@ -134,17 +135,78 @@ def latest_challenge(purpose: str = None):
     return q.first()
 
 
-def register_via_api(client, sign, public_key, username='alice'):
-    """Drive the full register flow; returns the User row at the end."""
-    r = client.post('/register', data={'username': username, 'public_key': public_key})
+def register_via_api(client, sign, public_key, username='alice',
+                     unix_username=None, host_public_key=None, hostname=None):
+    """Drive the full register flow; returns the User row at the end.
+
+    Registration now requires unix_username, hostname, and host_public_key.
+    Defaults to sane test values when not provided.
+    """
+    if unix_username is None:
+        unix_username = username
+    if hostname is None:
+        hostname = f'{username}-host.test'
+    if host_public_key is None:
+        # Generate a real ecdsa-sha2-nistp521 key for the host
+        import tempfile
+        import subprocess
+        from pathlib import Path
+        with tempfile.TemporaryDirectory() as d:
+            p = Path(d) / 'hk'
+            subprocess.run(
+                ['ssh-keygen', '-t', 'ecdsa', '-b', '521', '-f', str(p), '-N', '',
+                 '-C', f'host:{hostname}'],
+                check=True, capture_output=True,
+            )
+            host_public_key = (Path(d) / (p.name + '.pub')).read_text().strip()
+
+    r = client.post('/register', data={
+        'username': username,
+        'unix_username': unix_username,
+        'public_key': public_key,
+    })
     assert r.status_code == 302, r.data
     with sshadmin.app.app_context():
         ch = latest_challenge('register')
         token, nonce = ch.token, ch.nonce
     sig = sign(nonce)
-    r = client.post('/api/challenge_response', data={'token': token, 'signature': sig})
+    r = client.post('/api/challenge_response', data={
+        'token': token, 'signature': sig,
+        'hostname': hostname,
+        'host_public_key': host_public_key,
+    })
     assert r.status_code == 200, r.data
     r = client.get(f'/api/auth_status/{token}')
     assert r.json['status'] == 'completed', r.json
     with sshadmin.app.app_context():
         return sshadmin.User.query.filter_by(username=username).first()
+
+
+def set_host_enrolled(host_id: int, public_key: str = None):
+    """Set a Host as enrolled with the given public key (or a fake one).
+
+    Use this in tests instead of setting host.public_key directly (which is
+    a read-only property backed by SSHKey).
+    """
+    import tempfile
+    import subprocess
+    from pathlib import Path
+
+    if public_key is None:
+        with tempfile.TemporaryDirectory() as d:
+            p = Path(d) / 'hk'
+            subprocess.run(
+                ['ssh-keygen', '-t', 'ecdsa', '-b', '521', '-f', str(p), '-N', '',
+                 '-C', 'test-host'],
+                check=True, capture_output=True,
+            )
+            public_key = (Path(d) / (p.name + '.pub')).read_text().strip()
+
+    with sshadmin.app.app_context():
+        host = sshadmin.db.session.get(sshadmin.Host, host_id)
+        ssh_key = sshadmin._get_or_create_ssh_key(public_key, 'host')
+        sshadmin.db.session.flush()
+        host.host_key_id = ssh_key.id
+        host.enrolled_at = datetime.utcnow()
+        host.enrollment_token = None
+        sshadmin.db.session.commit()

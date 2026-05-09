@@ -22,7 +22,10 @@ def test_login_unknown_user_flashes(client):
 
 def test_login_pending_user_cannot_login(client, keypair):
     """A user who started but never completed registration can't log in."""
-    client.post('/register', data={'username': 'alice', 'public_key': keypair['public_key']})
+    client.post('/register', data={
+        'username': 'alice', 'unix_username': 'alice',
+        'public_key': keypair['public_key'],
+    })
     # Don't complete the challenge.
     r = client.post('/login', data={'username': 'alice'}, follow_redirects=True)
     assert b'No completed registration' in r.data

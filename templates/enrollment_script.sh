@@ -6,7 +6,7 @@ set -euo pipefail
 SSHADMIN_URL="{{ server_url }}"
 ENROLL_TOKEN="{{ token }}"
 KEY_TYPE="{{ key_type }}"
-HOST_KEY="/etc/ssh/ssh_host_ecdsa_key"
+HOST_KEY="/etc/ssh/ssh_host_sshadmin_ecdsa_key"
 HOST_PUB="${HOST_KEY}.pub"
 CA_PUB="/etc/ssh/sshadmin_ca.pub"
 SSHD_CONFIG="/etc/ssh/sshd_config"
@@ -99,15 +99,35 @@ echo "Registering host with sshadmin..."
 RESPONSE="$(curl -fsS -X POST "$SSHADMIN_URL/api/enroll/host" \
   --data-urlencode "token=$ENROLL_TOKEN" \
   --data-urlencode "public_key=$PUBKEY")"
-echo "$RESPONSE"
 
-# Reload sshd so the new drop-in and (eventually) host certificate take effect.
+# Extract and install the auto-issued host certificate if the server returned one.
+CERT_DATA=""
+if command -v python3 >/dev/null 2>&1; then
+  CERT_DATA="$(printf '%s' "$RESPONSE" | \
+    python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('cert_data') or '')" \
+    2>/dev/null || true)"
+elif command -v jq >/dev/null 2>&1; then
+  CERT_DATA="$(printf '%s' "$RESPONSE" | jq -r '.cert_data // empty' 2>/dev/null || true)"
+fi
+
+if [ -n "$CERT_DATA" ]; then
+  echo "Installing host certificate..."
+  printf '%s\n' "$CERT_DATA" > "${HOST_KEY}-cert.pub"
+  chmod 644 "${HOST_KEY}-cert.pub"
+  echo "  Certificate installed at ${HOST_KEY}-cert.pub"
+else
+  echo "NOTE: certificate not yet issued."
+  echo "      Go to the sshadmin web UI and issue a host certificate for {{ hostname }},"
+  echo "      then install it at ${HOST_KEY}-cert.pub"
+fi
+
+# Reload sshd so the new key, drop-in, and certificate take effect.
 if command -v systemctl >/dev/null && systemctl is-active --quiet ssh 2>/dev/null; then
   systemctl reload ssh
 elif command -v systemctl >/dev/null && systemctl is-active --quiet sshd 2>/dev/null; then
   systemctl reload sshd
 else
-  echo "NOTE: reload sshd manually to pick up new config."
+  echo "NOTE: reload sshd manually to pick up the new configuration."
 fi
 
-echo "Enrollment complete. Issue a host certificate from sshadmin and place it at ${HOST_KEY}-cert.pub."
+echo "Enrollment complete."

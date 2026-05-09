@@ -27,9 +27,22 @@
 
           <form method="POST">
             <div class="mb-3">
-              <label for="username" class="form-label">Username <span class="text-danger">*</span></label>
+              <label for="username" class="form-label">Account Name <span class="text-danger">*</span></label>
               <input type="text" class="form-control form-control-lg" id="username" name="username"
                      placeholder="e.g. jdoe" autocomplete="username" required>
+              <small class="form-text text-muted">
+                Your sshadmin account name. This is distinct from your OS login name.
+              </small>
+            </div>
+
+            <div class="mb-3">
+              <label for="unix_username" class="form-label">OS / Unix Username <span class="text-danger">*</span></label>
+              <input type="text" class="form-control" id="unix_username" name="unix_username"
+                     placeholder="e.g. alice" required>
+              <small class="form-text text-muted">
+                The login name you use on your machine (<code>whoami</code>). This becomes the
+                principal in your user certificate and must match the account you SSH from.
+              </small>
             </div>
 
             <div class="mb-3">

@@ -11,18 +11,18 @@
             <div class="card-body">
                 <form method="POST">
                     <div class="mb-3">
-                        <label for="user_id" class="form-label">SSH User <span class="text-danger">*</span></label>
-                        <select class="form-control form-select" id="user_id" name="user_id" required>
-                            <option value="">-- Select a user --</option>
-                            {% for user in users %}
-                            <option value="{{ user.id }}">
-                                {{ user.username }}
-                                {% if user.description %} - {{ user.description }}{% endif %}
+                        <label for="credential_id" class="form-label">SSH User Key <span class="text-danger">*</span></label>
+                        <select class="form-control form-select" id="credential_id" name="credential_id" required>
+                            <option value="">-- Select a credential --</option>
+                            {% for cred in credentials %}
+                            <option value="{{ cred.id }}">
+                                {{ cred.unix_username }}@{{ cred.host.hostname }}
+                                ({{ cred.user.username }}{% if cred.role == 'owner' %}, owner{% endif %})
                             </option>
                             {% endfor %}
                         </select>
-                        {% if not users %}
-                        <small class="text-danger">No SSH users available. <a href="/users/add">Add one first</a></small>
+                        {% if not credentials %}
+                        <small class="text-danger">No SSH user keys available. <a href="{{ url_for('add_credential') }}">Add one first</a></small>
                         {% endif %}
                     </div>
 
@@ -69,7 +69,7 @@
                     </div>
 
                     <div class="d-flex gap-2">
-                        <button type="submit" class="btn btn-success" {% if not users %}disabled{% endif %}>
+                        <button type="submit" class="btn btn-success" {% if not credentials %}disabled{% endif %}>
                             <i class="bi bi-file-certificate"></i> Issue Certificate
                         </button>
                         <a href="/certificates" class="btn btn-secondary">Cancel</a>

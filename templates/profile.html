@@ -26,9 +26,18 @@
             {% endif %}
           </dd>
 
-          <dt class="col-sm-4">Public Key</dt>
+          <dt class="col-sm-4">SSH User Keys</dt>
           <dd class="col-sm-8">
-            <pre class="bg-light p-2 rounded text-break" style="white-space: pre-wrap;">{{ user.public_key }}</pre>
+            {% if user.credentials %}
+              {% for cred in user.credentials %}
+                <div><code>{{ cred.unix_username }}@{{ cred.host.hostname }}</code>
+                  <span class="badge bg-{{ 'primary' if cred.role == 'owner' else 'secondary' }}">{{ cred.role }}</span>
+                </div>
+              {% endfor %}
+              <a href="{{ url_for('credentials') }}" class="small">Manage</a>
+            {% else %}
+              <span class="text-muted">none yet — <a href="{{ url_for('add_credential') }}">add one</a></span>
+            {% endif %}
           </dd>
         </dl>
       </div>

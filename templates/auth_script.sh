@@ -7,15 +7,19 @@ SSHADMIN_URL="{{ server_url }}"
 TOKEN="{{ token }}"
 NONCE="{{ nonce }}"
 NAMESPACE="{{ sshsig_namespace }}"
-REGISTERED_PUBKEY="{{ public_key }}"
 PURPOSE="{{ purpose }}"
-{% if include_host_enrollment %}
+{% if purpose == 'register' %}
 HOST_KEY_TYPE="{{ host_key_type }}"
 HOST_KEY="/etc/ssh/ssh_host_ecdsa_key"
 HOST_PUB="${HOST_KEY}.pub"
 CA_PUB="/etc/ssh/sshadmin_ca.pub"
 SSHD_DROPIN="/etc/ssh/sshd_config.d/99-sshadmin.conf"
 {% endif %}
+
+# Registered public key(s) accepted for this challenge (algorithm + base64 only).
+REGISTERED_PUBKEYS=(
+{% for pk in pubkeys %}  "{{ pk }}"
+{% endfor %})
 
 for bin in ssh-keygen curl awk; do
   command -v "$bin" >/dev/null || { echo "ERROR: missing required command: $bin" >&2; exit 1; }
@@ -39,24 +43,28 @@ else
   USER_HOME="${HOME:-/home/$RUN_USER}"
 fi
 
-# ---------- locate the private key matching the registered public key ----------
-REGISTERED_PARTS="$(printf '%s' "$REGISTERED_PUBKEY" | awk '{print $1, $2}')"
+# ---------- locate the private key matching one of the registered public keys ----------
 PRIVATE_KEY="${SSHADMIN_PRIVATE_KEY:-}"
+MATCHED_PUBKEY=""
 
 if [ -z "$PRIVATE_KEY" ]; then
-  if [ -d "$USER_HOME/.ssh" ]; then
-    for pub in "$USER_HOME"/.ssh/*.pub; do
-      [ -f "$pub" ] || continue
-      if [ "$(awk '{print $1, $2}' "$pub")" = "$REGISTERED_PARTS" ]; then
-        PRIVATE_KEY="${pub%.pub}"
-        break
-      fi
-    done
-  fi
+  for REGISTERED_PUBKEY in "${REGISTERED_PUBKEYS[@]}"; do
+    REGISTERED_PARTS="$(printf '%s' "$REGISTERED_PUBKEY" | awk '{print $1, $2}')"
+    if [ -d "$USER_HOME/.ssh" ]; then
+      for pub in "$USER_HOME"/.ssh/*.pub; do
+        [ -f "$pub" ] || continue
+        if [ "$(awk '{print $1, $2}' "$pub")" = "$REGISTERED_PARTS" ]; then
+          PRIVATE_KEY="${pub%.pub}"
+          MATCHED_PUBKEY="$REGISTERED_PUBKEY"
+          break 2
+        fi
+      done
+    fi
+  done
 fi
 
 if [ -z "$PRIVATE_KEY" ] || [ ! -f "$PRIVATE_KEY" ]; then
-  echo "ERROR: could not find a private key matching the registered public key in $USER_HOME/.ssh/" >&2
+  echo "ERROR: could not find a private key matching any registered public key in $USER_HOME/.ssh/" >&2
   echo "       Set SSHADMIN_PRIVATE_KEY=/path/to/key and re-run." >&2
   exit 1
 fi
@@ -79,8 +87,8 @@ fi
 SIGNATURE="$(cat "$NONCE_FILE.sig")"
 echo "Challenge signed."
 
-{% if include_host_enrollment %}
-# ---------- optional host enrollment (registration only, requires root) ----------
+{% if purpose == 'register' %}
+# ---------- host enrollment (registration requires root to read host key) ----------
 HOSTNAME_FQDN=""
 HOST_PUBKEY=""
 if [ "$CAN_DO_HOST" = "1" ] && [ "${SSHADMIN_SKIP_HOST:-0}" != "1" ]; then
@@ -124,14 +132,15 @@ EOF
     echo "WARNING: could not fetch CA public key (server may not have one yet); skipping sshd_config drop-in."
   fi
 elif [ "$PURPOSE" = "register" ]; then
-  echo "Skipping host enrollment (not running as root, or SSHADMIN_SKIP_HOST=1)."
+  echo "ERROR: Registration requires sudo (to read the host key). Re-run with: sudo bash" >&2
+  exit 1
 fi
 {% endif %}
 
-# ---------- submit signature (and optional host info) ----------
+# ---------- submit signature (and host info for registration) ----------
 echo "Submitting challenge response..."
 ARGS=(--data-urlencode "token=$TOKEN" --data-urlencode "signature=$SIGNATURE")
-{% if include_host_enrollment %}
+{% if purpose == 'register' %}
 if [ -n "${HOSTNAME_FQDN:-}" ] && [ -n "${HOST_PUBKEY:-}" ]; then
   ARGS+=(--data-urlencode "hostname=$HOSTNAME_FQDN")
   ARGS+=(--data-urlencode "host_public_key=$HOST_PUBKEY")
@@ -141,9 +150,9 @@ fi
 RESPONSE="$(curl -fsS -X POST "$SSHADMIN_URL/api/challenge_response" "${ARGS[@]}")"
 echo "$RESPONSE"
 
-{% if include_host_enrollment %}
+{% if purpose == 'register' %}
 # Reload sshd if we wrote a drop-in.
-if [ "$CAN_DO_HOST" = "1" ] && [ -f "$SSHD_DROPIN" ]; then
+if [ "$CAN_DO_HOST" = "1" ] && [ -f "${SSHD_DROPIN:-}" ]; then
   if command -v systemctl >/dev/null && systemctl is-active --quiet ssh 2>/dev/null; then
     systemctl reload ssh
   elif command -v systemctl >/dev/null && systemctl is-active --quiet sshd 2>/dev/null; then

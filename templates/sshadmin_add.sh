@@ -149,11 +149,9 @@ info "Collecting keys from ${REMOTE_HOST}..."
 REMOTE_JSON=$(ssh -o BatchMode=yes -o StrictHostKeyChecking=accept-new "$TARGET" sh <<'GATHER'
 set -e
 
-ALLOWED_USER_KEYS="ecdsa-sha2-nistp521 ssh-ed25519 ecdsa-sha2-nistp384"
-
 # ── Host key ──────────────────────────────────────────────────────────────────
-# sshadmin requires ecdsa-sha2-nistp521; generate it if missing or wrong type
-HOST_KEY_FILE="/etc/ssh/ssh_host_ecdsa_key"
+# sshadmin uses a dedicated key file so it never conflicts with existing host keys.
+HOST_KEY_FILE="/etc/ssh/ssh_host_sshadmin_ecdsa_key"
 HOST_KEY=""
 
 if [ -f "${HOST_KEY_FILE}.pub" ]; then
@@ -168,25 +166,20 @@ if [ -z "$HOST_KEY" ]; then
 fi
 
 # ── User key ──────────────────────────────────────────────────────────────────
-# Accept ecdsa-sha2-nistp521, ssh-ed25519, or ecdsa-sha2-nistp384; else generate
+# sshadmin uses a dedicated key file so it never conflicts with existing user keys.
+SSHADMIN_USER_KEY_FILE="$HOME/.ssh/id_sshadmin"
 USER_KEY=""
 
-for kf in "$HOME/.ssh/id_ecdsa" "$HOME/.ssh/id_ed25519" "$HOME/.ssh/id_ecdsa_384"; do
-    if [ -f "${kf}.pub" ]; then
-        ktype=$(awk '{print $1}' < "${kf}.pub")
-        if echo "$ALLOWED_USER_KEYS" | grep -qw "$ktype"; then
-            USER_KEY=$(cat "${kf}.pub")
-            break
-        fi
-    fi
-done
+if [ -f "${SSHADMIN_USER_KEY_FILE}.pub" ]; then
+    USER_KEY=$(cat "${SSHADMIN_USER_KEY_FILE}.pub")
+fi
 
 if [ -z "$USER_KEY" ]; then
-    echo "Generating ed25519 user key..." >&2
+    echo "Generating sshadmin ecdsa-sha2-nistp521 user key..." >&2
     mkdir -p "$HOME/.ssh"
     chmod 700 "$HOME/.ssh"
-    ssh-keygen -t ed25519 -f "$HOME/.ssh/id_ed25519" -N "" -q
-    USER_KEY=$(cat "$HOME/.ssh/id_ed25519.pub")
+    ssh-keygen -t ecdsa -b 521 -f "$SSHADMIN_USER_KEY_FILE" -N "" -q
+    USER_KEY=$(cat "${SSHADMIN_USER_KEY_FILE}.pub")
 fi
 
 # ── Emit JSON ─────────────────────────────────────────────────────────────────
@@ -266,8 +259,8 @@ USER_CERT=\$(printf '%s' "${USER_CERT_B64}" | base64 -d)
 CA_PUBKEY=\$(printf '%s' "${CA_PUBKEY_B64}" | base64 -d)
 
 echo "  Installing host certificate..."
-printf '%s\n' "\$HOST_CERT" | sudo tee /etc/ssh/ssh_host_ecdsa_key-cert.pub > /dev/null
-sudo chmod 644 /etc/ssh/ssh_host_ecdsa_key-cert.pub
+printf '%s\n' "\$HOST_CERT" | sudo tee /etc/ssh/ssh_host_sshadmin_ecdsa_key-cert.pub > /dev/null
+sudo chmod 644 /etc/ssh/ssh_host_sshadmin_ecdsa_key-cert.pub
 
 echo "  Installing CA public key..."
 printf '%s\n' "\$CA_PUBKEY" | sudo tee /etc/ssh/sshadmin_ca.pub > /dev/null
@@ -277,7 +270,7 @@ echo "  Configuring sshd..."
 sudo mkdir -p /etc/ssh/sshd_config.d
 printf '%s\n' \
     "# Managed by sshadmin_add — do not edit manually" \
-    "HostCertificate /etc/ssh/ssh_host_ecdsa_key-cert.pub" \
+    "HostCertificate /etc/ssh/ssh_host_sshadmin_ecdsa_key-cert.pub" \
     "TrustedUserCAKeys /etc/ssh/sshadmin_ca.pub" \
     | sudo tee /etc/ssh/sshd_config.d/99-sshadmin.conf > /dev/null
 
@@ -291,8 +284,8 @@ sudo chmod 644 /etc/ssh/ssh_known_hosts
 echo "  Installing user certificate..."
 mkdir -p "\$HOME/.ssh"
 chmod 700 "\$HOME/.ssh"
-printf '%s\n' "\$USER_CERT" > "\$HOME/.ssh/id_ecdsa-cert.pub"
-chmod 644 "\$HOME/.ssh/id_ecdsa-cert.pub"
+printf '%s\n' "\$USER_CERT" > "\$HOME/.ssh/id_sshadmin-cert.pub"
+chmod 644 "\$HOME/.ssh/id_sshadmin-cert.pub"
 
 echo "  Reloading sshd..."
 if command -v systemctl >/dev/null 2>&1; then
@@ -320,8 +313,8 @@ mv "${LOCAL_KH}.tmp" "$LOCAL_KH"
 
 info ""
 info "Done: ${REMOTE_HOST} enrolled successfully."
-info "  Host cert : /etc/ssh/ssh_host_ecdsa_key-cert.pub  (on ${REMOTE_HOST})"
-info "  User cert : ~/.ssh/id_ecdsa-cert.pub              (on ${REMOTE_HOST})"
+info "  Host cert : /etc/ssh/ssh_host_sshadmin_ecdsa_key-cert.pub  (on ${REMOTE_HOST})"
+info "  User cert : ~/.ssh/id_sshadmin-cert.pub                   (on ${REMOTE_HOST})"
 info "  CA trusted: ${REMOTE_HOST} sshd + your local known_hosts"
 info ""
 info "  Test: ssh ${REMOTE_USER}@${REMOTE_HOST}"

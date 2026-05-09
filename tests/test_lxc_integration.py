@@ -267,10 +267,29 @@ class _AdminSession:
 
 
 def _http_register(session: _AdminSession, sign_fn, public_key: str,
-                   username: str) -> None:
+                   username: str, unix_username: str = None,
+                   host_public_key: str = None, hostname: str = None) -> None:
     """Drive the sshadmin registration flow via real HTTP, leaving the user logged in."""
+    if unix_username is None:
+        unix_username = username
+    if hostname is None:
+        hostname = f'fake-host-{username}'
+    if host_public_key is None:
+        with tempfile.TemporaryDirectory() as tmp:
+            key_path = os.path.join(tmp, 'host_key')
+            subprocess.run(
+                ['ssh-keygen', '-t', 'ecdsa', '-b', '521',
+                 '-f', key_path, '-N', '', '-C', ''],
+                check=True, capture_output=True,
+            )
+            host_public_key = Path(key_path + '.pub').read_text().strip()
+
     # POST /register -> redirect to /auth/await/<token>
-    final_url = session.post('/register', {'username': username, 'public_key': public_key})
+    final_url = session.post('/register', {
+        'username': username,
+        'unix_username': unix_username,
+        'public_key': public_key,
+    })
     token = final_url.rstrip('/').split('/')[-1]
 
     # Fetch the auth script which embeds the challenge nonce
@@ -279,9 +298,12 @@ def _http_register(session: _AdminSession, sign_fn, public_key: str,
     assert m, f'NONCE not found in auth script for {username}'
     nonce = m.group(1)
 
-    # Sign and submit the challenge
+    # Sign and submit the challenge (registration requires hostname + host_public_key)
     sig = sign_fn(nonce)
-    session.post('/api/challenge_response', {'token': token, 'signature': sig})
+    session.post('/api/challenge_response', {
+        'token': token, 'signature': sig,
+        'hostname': hostname, 'host_public_key': host_public_key,
+    })
 
     # Poll auth status; this also calls login_user() server-side and sets
     # the Flask-Login session cookie in our jar for subsequent admin calls.
@@ -571,8 +593,12 @@ sshadmin.cert_gen.generate_ca(comment='lxc-integration-test CA')
             u: int(_sqlite_value(f"SELECT id FROM user WHERE username='{u}'"))
             for u in USERNAMES
         }
-        state['sshuser_ids'] = {
-            u: int(_sqlite_value(f"SELECT id FROM sshuser WHERE username='{u}'"))
+        state['credential_ids'] = {
+            u: int(_sqlite_value(
+                f"SELECT uc.id FROM user_credential uc "
+                f"JOIN user usr ON usr.id = uc.user_id "
+                f"WHERE usr.username='{u}' LIMIT 1"
+            ))
             for u in USERNAMES
         }
 
@@ -608,8 +634,10 @@ sshadmin.cert_gen.generate_ca(comment='lxc-integration-test CA')
                                {'host_id': host_id, 'valid_days': '365'})
 
             cert_data = _sqlite_value(
-                f"SELECT certificate_data FROM certificate "
-                f"WHERE host_id={host_id} AND cert_type='host' ORDER BY id DESC LIMIT 1"
+                f"SELECT c.certificate_data FROM certificate c "
+                f"JOIN ssh_key sk ON sk.id = c.ssh_key_id "
+                f"JOIN host h ON h.host_key_id = sk.id "
+                f"WHERE h.id = {host_id} ORDER BY c.id DESC LIMIT 1"
             )
             host_cert_data[container] = cert_data
 
@@ -636,13 +664,14 @@ sshadmin.cert_gen.generate_ca(comment='lxc-integration-test CA')
         # ------------------------------------------------------------------ #
         user_certs: dict[str, str] = {}
         for username in USERNAMES:
-            sid = state['sshuser_ids'][username]
+            cred_id = state['credential_ids'][username]
             alice_session.post('/certificates/issue/user',
-                               {'user_id': sid, 'valid_days': '365',
+                               {'credential_id': cred_id, 'valid_days': '365',
                                 'principals': username})
             cert_data = _sqlite_value(
-                f"SELECT certificate_data FROM certificate "
-                f"WHERE user_id={sid} AND cert_type='user' ORDER BY id DESC LIMIT 1"
+                f"SELECT c.certificate_data FROM certificate c "
+                f"JOIN user_credential uc ON uc.user_key_id = c.ssh_key_id "
+                f"WHERE uc.id = {cred_id} ORDER BY c.id DESC LIMIT 1"
             )
             user_certs[username] = cert_data
         state['user_certs'] = user_certs
@@ -738,10 +767,14 @@ def test_three_users_registered(lxc_env):
 
 
 def test_each_user_has_ssh_identity(lxc_env):
-    """Registration must auto-create an SSHUser for each login user."""
+    """Registration must auto-create a UserCredential for each login user."""
     for username in USERNAMES:
-        found = _sqlite_value(f"SELECT id FROM sshuser WHERE username='{username}'")
-        assert found, f'SSHUser for {username} not found'
+        found = _sqlite_value(
+            f"SELECT uc.id FROM user_credential uc "
+            f"JOIN user usr ON usr.id = uc.user_id "
+            f"WHERE usr.username='{username}'"
+        )
+        assert found, f'UserCredential for {username} not found'
 
 
 def test_both_ubuntu_hosts_enrolled(lxc_env):
@@ -750,7 +783,11 @@ def test_both_ubuntu_hosts_enrolled(lxc_env):
     for c in SSH_CONTAINERS:
         ip          = ips[c]
         enrolled_at = _sqlite_value(f"SELECT enrolled_at FROM host WHERE hostname='{ip}'")
-        pub_key     = _sqlite_value(f"SELECT public_key FROM host WHERE hostname='{ip}'")
+        pub_key     = _sqlite_value(
+            f"SELECT sk.public_key FROM host h "
+            f"JOIN ssh_key sk ON sk.id = h.host_key_id "
+            f"WHERE h.hostname='{ip}'"
+        )
         assert enrolled_at, f'Host {c} not enrolled'
         assert pub_key.startswith('ecdsa-sha2-nistp521 '), \
             f'Host {c} wrong key type: {pub_key[:60]}'
@@ -996,8 +1033,14 @@ def lxc_enroll_env(lxc_env, user_keypairs):
         _push_text(CENROLL_ALPINE, alice_pub + '\n',
                    '/home/alice/.ssh/authorized_keys',
                    mode='600', owner='alice:alice')
-        _push_text(CENROLL_ALPINE, 'alice ALL=(ALL) NOPASSWD:ALL\n',
+        _push_text(CENROLL_ALPINE,
+                   'Defaults !requiretty\nalice ALL=(ALL) NOPASSWD:ALL\n',
                    '/etc/sudoers.d/alice', mode='440')
+        # Remove the P-256 ECDSA key generated by ssh-keygen -A so that
+        # sshadmin_add can generate a P-521 key without an overwrite prompt.
+        _lxc_exec(CENROLL_ALPINE, 'rm', '-f',
+                  '/etc/ssh/ssh_host_ecdsa_key',
+                  '/etc/ssh/ssh_host_ecdsa_key.pub')
 
         # ------------------------------------------------------------------ #
         # Restart CAPP with SSH auth server enabled (needed for add_machine)  #
@@ -1039,13 +1082,15 @@ def lxc_enroll_env(lxc_env, user_keypairs):
         )
         state['alpine_result'] = alpine_result
 
-        # Reload Alpine sshd so it picks up the new TrustedUserCAKeys config.
-        # sshadmin_add tries kill -HUP but /var/run/sshd.pid path varies; we
-        # force it here via lxc exec so the SSH cert-auth test is reliable.
+        # Full sshd restart on Alpine so it picks up the new P-521 host key,
+        # host cert, and TrustedUserCAKeys config.  A simple SIGHUP is
+        # unreliable because Alpine may not write a PID file to the expected
+        # path; pkill + respawn is the safest approach.
         _lxc_exec(CENROLL_ALPINE, 'sh', '-c',
-                  'kill -HUP $(cat /var/run/sshd.pid 2>/dev/null || '
-                  'cat /run/sshd.pid 2>/dev/null) 2>/dev/null || true',
-                  check=False)
+                  'pkill sshd || true', check=False)
+        time.sleep(1)
+        _lxc_exec(CENROLL_ALPINE, '/usr/sbin/sshd', check=False)
+        _wait_for_ssh_port(CENROLL_ALPINE, port=22, max_wait=15)
 
         # CENROLL_UBUNTU and CENROLL_ALPINE need the CA in their global
         # known_hosts so cert-verified outbound SSH from C1 to them works
@@ -1092,8 +1137,9 @@ def test_sshadmin_add_ubuntu_host_cert_in_db(lxc_enroll_env):
     # the container may report a short name or the IP.  We look up by prefix match.
     row = _sqlite_value(
         f"SELECT h.hostname FROM host h "
-        f"JOIN certificate c ON c.host_id = h.id "
-        f"WHERE c.cert_type='host' AND h.enrolled_at IS NOT NULL "
+        f"JOIN ssh_key sk ON sk.id = h.host_key_id "
+        f"JOIN certificate c ON c.ssh_key_id = sk.id "
+        f"WHERE h.enrolled_at IS NOT NULL "
         f"ORDER BY c.id DESC LIMIT 1"
     )
     assert row, (
@@ -1107,8 +1153,9 @@ def test_sshadmin_add_alpine_host_cert_in_db(lxc_enroll_env):
     alpine_ip = lxc_enroll_env['ips'][CENROLL_ALPINE]
     row = _sqlite_value(
         f"SELECT h.hostname FROM host h "
-        f"JOIN certificate c ON c.host_id = h.id "
-        f"WHERE c.cert_type='host' AND h.enrolled_at IS NOT NULL "
+        f"JOIN ssh_key sk ON sk.id = h.host_key_id "
+        f"JOIN certificate c ON c.ssh_key_id = sk.id "
+        f"WHERE h.enrolled_at IS NOT NULL "
         f"ORDER BY c.id DESC LIMIT 1"
     )
     assert row, (

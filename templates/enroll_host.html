@@ -55,7 +55,8 @@
 <div class="card mb-3">
   <div class="card-header d-flex justify-content-between align-items-center">
     <span>Option 2: Copy &amp; paste the full script into a root shell</span>
-    <a class="btn btn-sm btn-outline-light" href="{{ url_for('enroll_host_script', host_id=host.id) }}">
+    <a class="btn btn-sm btn-outline-light"
+       href="{{ url_for('api_enroll_script', token=host.enrollment_token, host_id=host.id) }}">
       <i class="bi bi-download"></i> Download .sh
     </a>
   </div>

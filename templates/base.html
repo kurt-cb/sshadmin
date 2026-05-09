@@ -139,8 +139,8 @@
                         </a>
                     </li>
                     <li class="nav-item">
-                        <a class="nav-link {% if request.endpoint in ('users', 'add_user', 'delete_user') %}active{% endif %}" href="{{ url_for('users') }}">
-                            <i class="bi bi-people"></i> Registered Users
+                        <a class="nav-link {% if request.endpoint and 'credential' in request.endpoint %}active{% endif %}" href="{{ url_for('credentials') }}">
+                            <i class="bi bi-people"></i> SSH User Keys
                         </a>
                     </li>
                     <li class="nav-item">

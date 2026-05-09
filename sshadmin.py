@@ -1,10 +1,13 @@
 """
 SSH Certificate Admin - Web-based SSH certificate management system
 """
+__version__ = '0.0.7'
 from flask import Flask, render_template, request, jsonify, redirect, url_for, flash, session, Response
 from flask_sqlalchemy import SQLAlchemy
 from flask_login import LoginManager, UserMixin, login_user, logout_user, login_required, current_user
 from datetime import datetime, timedelta
+import base64
+import hashlib
 import io
 import os
 import json
@@ -29,127 +32,199 @@ app.config['SECRET_KEY'] = os.environ.get('SECRET_KEY', 'dev-secret-key-change-i
 app.config['SQLALCHEMY_DATABASE_URI'] = os.environ.get('DATABASE_URL', 'sqlite:///sshadmin.db')
 app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
 
-# Initialize extensions
 db = SQLAlchemy(app)
 login_manager = LoginManager(app)
 login_manager.login_view = 'login'
 
+
 # ==================== Database Models ====================
 
-host_owners = db.Table(
-    'host_owners',
-    db.Column('host_id', db.Integer, db.ForeignKey('host.id', ondelete='CASCADE'), primary_key=True),
-    db.Column('user_id', db.Integer, db.ForeignKey('user.id', ondelete='CASCADE'), primary_key=True),
-    db.Column('added_at', db.DateTime, default=datetime.utcnow),
-)
-
-
-class User(UserMixin, db.Model):
-    """Application user model — auth via SSH-key challenge/response (no password)."""
+class SSHKey(db.Model):
+    """Canonical SSH public key record — both host and user keys live here."""
+    __tablename__ = 'ssh_key'
     id = db.Column(db.Integer, primary_key=True)
-    username = db.Column(db.String(80), unique=True, nullable=False)
+    key_hash = db.Column(db.String(128), unique=True, nullable=False, index=True)
+    key_type = db.Column(db.String(10), nullable=False)   # 'host' or 'user'
     public_key = db.Column(db.Text, nullable=False)
-    is_admin = db.Column(db.Boolean, default=False)
     created_at = db.Column(db.DateTime, default=datetime.utcnow)
-    completed_at = db.Column(db.DateTime, nullable=True)
 
-    # Optional TOTP as an alternate login method.
-    totp_secret = db.Column(db.String(64), nullable=True)
-    totp_enabled = db.Column(db.Boolean, default=False, nullable=False)
-
-    owned_hosts = db.relationship('Host', secondary=host_owners, back_populates='owners')
-
-    @property
-    def is_active(self):
-        # Flask-Login refuses to log in users where is_active is False.
-        return self.completed_at is not None
-
-
-class Challenge(db.Model):
-    """One-time SSHSIG challenge for register-or-login flows."""
-    id = db.Column(db.Integer, primary_key=True)
-    token = db.Column(db.String(64), unique=True, nullable=False, index=True)
-    nonce = db.Column(db.String(128), nullable=False)
-    purpose = db.Column(db.String(20), nullable=False)  # 'register' or 'login'
-    user_id = db.Column(db.Integer, db.ForeignKey('user.id'), nullable=False)
-    created_at = db.Column(db.DateTime, default=datetime.utcnow)
-    expires_at = db.Column(db.DateTime, nullable=False)
-    consumed_at = db.Column(db.DateTime, nullable=True)
-
-    user = db.relationship('User', backref='challenges')
-
-    @property
-    def is_active(self):
-        return self.consumed_at is None and self.expires_at > datetime.utcnow()
+    certificates = db.relationship('Certificate', back_populates='ssh_key',
+                                   cascade='all, delete-orphan')
 
 
 class Host(db.Model):
-    """SSH host model"""
+    """SSH host managed by sshadmin."""
     id = db.Column(db.Integer, primary_key=True)
     hostname = db.Column(db.String(255), unique=True, nullable=False)
     description = db.Column(db.Text)
-    public_key = db.Column(db.Text, nullable=True)
+    host_key_id = db.Column(db.Integer, db.ForeignKey('ssh_key.id'), nullable=True)
     created_at = db.Column(db.DateTime, default=datetime.utcnow)
     created_by_id = db.Column(db.Integer, db.ForeignKey('user.id'), nullable=False)
-
     enrollment_token = db.Column(db.String(64), unique=True, nullable=True, index=True)
     enrollment_expires_at = db.Column(db.DateTime, nullable=True)
     enrolled_at = db.Column(db.DateTime, nullable=True)
 
+    host_key = db.relationship('SSHKey', foreign_keys=[host_key_id])
     creator = db.relationship('User', backref='hosts', foreign_keys=[created_by_id])
-    certificates = db.relationship('Certificate', backref='host', lazy=True, cascade='all, delete-orphan')
-    owners = db.relationship('User', secondary=host_owners, back_populates='owned_hosts')
+    host_users = db.relationship('HostUsers', back_populates='host',
+                                 cascade='all, delete-orphan')
 
     @property
     def is_enrolled(self):
-        return self.enrolled_at is not None and self.public_key
+        return self.enrolled_at is not None and self.host_key_id is not None
+
+    @property
+    def public_key(self):
+        return self.host_key.public_key if self.host_key else None
+
+    @property
+    def owners(self):
+        return [hu.user for hu in self.host_users if hu.role == 'owner']
+
+    @property
+    def users(self):
+        return [hu.user for hu in self.host_users]
 
     def issue_enrollment_token(self):
         self.enrollment_token = secrets.token_urlsafe(32)
         self.enrollment_expires_at = datetime.utcnow() + timedelta(hours=ENROLLMENT_TOKEN_TTL_HOURS)
         self.enrolled_at = None
-        self.public_key = None
+        self.host_key_id = None
 
 
-class SSHUser(db.Model):
-    """SSH user model"""
-    __tablename__ = 'sshuser'
+class HostUsers(db.Model):
+    """Association between an sshadmin User and a Host, with an access role."""
+    __tablename__ = 'host_users'
     id = db.Column(db.Integer, primary_key=True)
-    username = db.Column(db.String(255), nullable=False)
-    public_key = db.Column(db.Text, nullable=False)
-    description = db.Column(db.Text)
+    host_id = db.Column(db.Integer, db.ForeignKey('host.id', ondelete='CASCADE'), nullable=False)
+    user_id = db.Column(db.Integer, db.ForeignKey('user.id', ondelete='CASCADE'), nullable=False)
+    role = db.Column(db.String(10), nullable=False, default='user')  # 'owner' or 'user'
     created_at = db.Column(db.DateTime, default=datetime.utcnow)
-    created_by_id = db.Column(db.Integer, db.ForeignKey('user.id'), nullable=False)
 
-    creator = db.relationship('User', backref='ssh_users')
-    certificates = db.relationship('Certificate', backref='user', lazy=True, cascade='all, delete-orphan')
+    __table_args__ = (db.UniqueConstraint('host_id', 'user_id', name='_host_user_uc'),)
 
-    __table_args__ = (db.UniqueConstraint('username', 'public_key', name='_username_key_uc'),)
+    host = db.relationship('Host', back_populates='host_users')
+    user = db.relationship('User', back_populates='host_roles')
+    credentials = db.relationship('UserCredential', back_populates='host_user',
+                                  cascade='all, delete-orphan')
+
+
+class User(UserMixin, db.Model):
+    """sshadmin account — identity proven by any registered SSH user key."""
+    id = db.Column(db.Integer, primary_key=True)
+    username = db.Column(db.String(80), unique=True, nullable=False)
+    is_admin = db.Column(db.Boolean, default=False)
+    created_at = db.Column(db.DateTime, default=datetime.utcnow)
+    completed_at = db.Column(db.DateTime, nullable=True)
+    totp_secret = db.Column(db.String(64), nullable=True)
+    totp_enabled = db.Column(db.Boolean, default=False, nullable=False)
+
+    credentials = db.relationship('UserCredential', back_populates='user',
+                                  cascade='all, delete-orphan')
+    host_roles = db.relationship('HostUsers', back_populates='user')
+
+    @property
+    def is_active(self):
+        return self.completed_at is not None
+
+    @property
+    def owned_hosts(self):
+        return [hu.host for hu in self.host_roles if hu.role == 'owner']
+
+
+class UserCredential(db.Model):
+    """An SSH user key on a specific host, owned by one sshadmin User.
+
+    This is the unit of certificate issuance: each credential gets its own
+    user certificate, valid for `unix_username` as the principal.  The private
+    key lives on the host; duplicating it across machines is discouraged and
+    detected at enrolment time.
+    """
+    __tablename__ = 'user_credential'
+    id = db.Column(db.Integer, primary_key=True)
+    user_id = db.Column(db.Integer, db.ForeignKey('user.id', ondelete='CASCADE'), nullable=False)
+    user_key_id = db.Column(db.Integer, db.ForeignKey('ssh_key.id'), nullable=False)
+    host_user_id = db.Column(db.Integer,
+                             db.ForeignKey('host_users.id', ondelete='CASCADE'), nullable=False)
+    unix_username = db.Column(db.String(255), nullable=False)
+    created_at = db.Column(db.DateTime, default=datetime.utcnow)
+
+    user = db.relationship('User', back_populates='credentials')
+    user_key = db.relationship('SSHKey', foreign_keys=[user_key_id])
+    host_user = db.relationship('HostUsers', back_populates='credentials')
+
+    @property
+    def host(self):
+        return self.host_user.host
+
+    @property
+    def role(self):
+        return self.host_user.role
 
 
 class Certificate(db.Model):
-    """SSH certificate model"""
+    """Issued SSH certificate (user or host); cert_type derived from ssh_key.key_type."""
     id = db.Column(db.Integer, primary_key=True)
-    cert_type = db.Column(db.String(20), nullable=False)  # 'user' or 'host'
-    user_id = db.Column(db.Integer, db.ForeignKey('sshuser.id'), nullable=True)
-    host_id = db.Column(db.Integer, db.ForeignKey('host.id'), nullable=True)
-    public_key = db.Column(db.Text, nullable=False)
+    ssh_key_id = db.Column(db.Integer, db.ForeignKey('ssh_key.id'), nullable=False)
     serial = db.Column(db.String(255), nullable=False, unique=True)
     valid_from = db.Column(db.DateTime, nullable=False)
     valid_until = db.Column(db.DateTime, nullable=False)
     created_at = db.Column(db.DateTime, default=datetime.utcnow)
     created_by_id = db.Column(db.Integer, db.ForeignKey('user.id'), nullable=False)
-    certificate_data = db.Column(db.Text)  # OpenSSH certificate format
-
-    # One-time install token for the curl-based install one-liner.
+    certificate_data = db.Column(db.Text)
     install_token = db.Column(db.String(64), unique=True, nullable=True, index=True)
     install_token_expires_at = db.Column(db.DateTime, nullable=True)
 
+    ssh_key = db.relationship('SSHKey', back_populates='certificates')
     creator = db.relationship('User', backref='issued_certificates')
+
+    @property
+    def cert_type(self):
+        return self.ssh_key.key_type if self.ssh_key else None
+
+    @property
+    def host(self):
+        if self.ssh_key and self.ssh_key.key_type == 'host':
+            return Host.query.filter_by(host_key_id=self.ssh_key_id).first()
+        return None
+
+    @property
+    def credential(self):
+        if self.ssh_key and self.ssh_key.key_type == 'user':
+            return UserCredential.query.filter_by(user_key_id=self.ssh_key_id).first()
+        return None
+
+    @property
+    def public_key(self):
+        return self.ssh_key.public_key if self.ssh_key else None
 
     def issue_install_token(self, ttl_hours=2):
         self.install_token = secrets.token_urlsafe(32)
         self.install_token_expires_at = datetime.utcnow() + timedelta(hours=ttl_hours)
+
+
+class Challenge(db.Model):
+    """One-time challenge for register-or-login flows."""
+    id = db.Column(db.Integer, primary_key=True)
+    token = db.Column(db.String(64), unique=True, nullable=False, index=True)
+    nonce = db.Column(db.String(128), nullable=False)
+    purpose = db.Column(db.String(20), nullable=False)   # 'register' or 'login'
+    user_id = db.Column(db.Integer, db.ForeignKey('user.id'), nullable=False)
+    # Registration-only fields (null for login challenges)
+    expected_key = db.Column(db.Text, nullable=True)     # public key to verify the signature
+    unix_username = db.Column(db.String(255), nullable=True)  # OS username on the host
+    # Set after successful verification to record which credential was used
+    credential_id = db.Column(db.Integer, db.ForeignKey('user_credential.id'), nullable=True)
+    created_at = db.Column(db.DateTime, default=datetime.utcnow)
+    expires_at = db.Column(db.DateTime, nullable=False)
+    consumed_at = db.Column(db.DateTime, nullable=True)
+
+    user = db.relationship('User', backref='challenges')
+    credential = db.relationship('UserCredential')
+
+    @property
+    def is_active(self):
+        return self.consumed_at is None and self.expires_at > datetime.utcnow()
 
 
 # ==================== Login Manager ====================
@@ -162,16 +237,72 @@ def load_user(user_id):
     return user
 
 
-def verify_sshsig(public_key, signature_armor, message, identity='user', namespace=SSHSIG_NAMESPACE):
-    """Verify an SSHSIG-format signature using `ssh-keygen -Y verify`.
+# ==================== Helpers ====================
 
-    Returns True on success, False otherwise.
-    """
+def _pubkey_hash(pubkey: str) -> str:
+    """SHA-256 fingerprint of an SSH public key (matches ssh-keygen -l -E sha256 format)."""
+    parts = (pubkey or '').strip().split()
+    if len(parts) < 2:
+        return ''
+    try:
+        key_bytes = base64.b64decode(parts[1])
+        digest = hashlib.sha256(key_bytes).digest()
+        return 'SHA256:' + base64.b64encode(digest).decode().rstrip('=')
+    except Exception:
+        return ''
+
+
+def _pubkey_match(a: str, b: str) -> bool:
+    """Compare just the algorithm + base64 parts of two SSH public keys."""
+    pa = (a or '').split()
+    pb = (b or '').split()
+    return len(pa) >= 2 and len(pb) >= 2 and pa[0] == pb[0] and pa[1] == pb[1]
+
+
+def _normalize_pubkey(pubkey: str) -> str:
+    """Return 'algorithm base64' (drop comment)."""
+    parts = (pubkey or '').split()
+    return ' '.join(parts[:2]) if len(parts) >= 2 else ''
+
+
+def _get_or_create_ssh_key(pubkey: str, key_type: str) -> 'SSHKey':
+    """Return existing SSHKey by fingerprint or create one. Does not flush/commit."""
+    norm = _normalize_pubkey(pubkey)
+    h = _pubkey_hash(norm)
+    key = SSHKey.query.filter_by(key_hash=h).first()
+    if key is None:
+        key = SSHKey(key_hash=h, key_type=key_type, public_key=norm)
+        db.session.add(key)
+    return key
+
+
+def _get_or_create_host_user(host_id: int, user_id: int, role: str) -> 'HostUsers':
+    """Return existing HostUsers row or create one. Upgrades 'user' → 'owner' if needed."""
+    hu = HostUsers.query.filter_by(host_id=host_id, user_id=user_id).first()
+    if hu is None:
+        hu = HostUsers(host_id=host_id, user_id=user_id, role=role)
+        db.session.add(hu)
+    elif role == 'owner' and hu.role != 'owner':
+        hu.role = 'owner'
+    return hu
+
+
+def _latest_valid_cert_for_key(ssh_key_id: int) -> 'Certificate | None':
+    """Most recent still-valid certificate for the given SSHKey id."""
+    return (Certificate.query
+            .filter_by(ssh_key_id=ssh_key_id)
+            .filter(Certificate.valid_until > datetime.utcnow())
+            .order_by(Certificate.created_at.desc())
+            .first())
+
+
+def verify_sshsig(public_key, signature_armor, message,
+                  identity='user', namespace=SSHSIG_NAMESPACE):
+    """Verify an SSHSIG-format signature using `ssh-keygen -Y verify`."""
     parts = (public_key or '').strip().split()
     if len(parts) < 2:
         return False
     clean_pubkey = parts[0] + ' ' + parts[1]
-
     with tempfile.TemporaryDirectory() as tmp:
         allowed_signers = os.path.join(tmp, 'allowed_signers')
         sig_path = os.path.join(tmp, 'message.sig')
@@ -182,26 +313,24 @@ def verify_sshsig(public_key, signature_armor, message, identity='user', namespa
         try:
             result = subprocess.run(
                 ['ssh-keygen', '-Y', 'verify',
-                 '-f', allowed_signers,
-                 '-I', identity,
-                 '-n', namespace,
-                 '-s', sig_path],
-                input=message,
-                capture_output=True, text=True,
-                timeout=10,
+                 '-f', allowed_signers, '-I', identity,
+                 '-n', namespace, '-s', sig_path],
+                input=message, capture_output=True, text=True, timeout=10,
             )
         except Exception:
             return False
         return result.returncode == 0
 
 
-def _new_challenge(user, purpose):
-    """Create + persist a fresh Challenge for a user; caller must commit."""
+def _new_challenge(user, purpose, expected_key=None, unix_username=None):
+    """Create + persist a fresh Challenge. Caller must commit."""
     challenge = Challenge(
         token=secrets.token_urlsafe(32),
         nonce=secrets.token_hex(32),
         purpose=purpose,
         user_id=user.id,
+        expected_key=expected_key,
+        unix_username=unix_username,
         expires_at=datetime.utcnow() + timedelta(minutes=CHALLENGE_TTL_MINUTES),
     )
     db.session.add(challenge)
@@ -225,18 +354,16 @@ def admin_required(view):
 # ==================== SSH Certificate Generation ====================
 
 class SSHCertificateGenerator:
-    """Generate SSH certificates using OpenSSH format"""
+    """Generate SSH certificates using OpenSSH format."""
 
     def __init__(self):
         self.ca_key = os.environ.get('SSH_CA_KEY', '/etc/ssh/ca_key')
         self.ca_pubkey = self.ca_key + '.pub'
 
     def check_ca_keys(self):
-        """Check if CA keys exist"""
         return os.path.exists(self.ca_key) and os.path.exists(self.ca_pubkey)
 
     def generate_ca(self, key_type='ecdsa', bits=521, comment='sshadmin CA'):
-        """Generate a new CA keypair at self.ca_key. Refuses if it already exists."""
         if self.check_ca_keys():
             raise Exception('CA keys already exist')
         os.makedirs(os.path.dirname(self.ca_key) or '.', exist_ok=True)
@@ -255,7 +382,7 @@ class SSHCertificateGenerator:
     def read_ca_pubkey(self):
         if not os.path.exists(self.ca_pubkey):
             return None
-        with open(self.ca_pubkey, 'r') as f:
+        with open(self.ca_pubkey) as f:
             return f.read().strip()
 
     def ca_fingerprint(self):
@@ -272,82 +399,61 @@ class SSHCertificateGenerator:
 
     def generate_user_certificate(self, public_key_path, username, valid_days=365,
                                    principals=None, critical_options=None):
-        """Generate SSH user certificate.
-
-        critical_options: dict with optional keys 'source-address' (comma-separated
-        CIDRs) and/or 'force-command' (shell command string).
-        """
         if principals is None:
             principals = [username]
-
         serial = int(datetime.now().timestamp() * 1000)
-
+        cmd = [
+            'ssh-keygen', '-s', self.ca_key,
+            '-I', f'{username}-{serial}',
+            '-n', ','.join(principals),
+            '-V', f'always:+{valid_days}d',
+            '-z', str(serial),
+        ]
+        if critical_options:
+            src = critical_options.get('source-address', '').strip()
+            cmd_opt = critical_options.get('force-command', '').strip()
+            if src:
+                cmd += ['-O', f'source-address={src}']
+            if cmd_opt:
+                cmd += ['-O', f'force-command={cmd_opt}']
+        cmd.append(public_key_path)
         try:
-            cmd = [
-                'ssh-keygen',
-                '-s', self.ca_key,
-                '-I', f'{username}-{serial}',
-                '-n', ','.join(principals),
-                '-V', f'always:+{valid_days}d',
-                '-z', str(serial),
-            ]
-            if critical_options:
-                src = critical_options.get('source-address', '').strip()
-                cmd_opt = critical_options.get('force-command', '').strip()
-                if src:
-                    cmd += ['-O', f'source-address={src}']
-                if cmd_opt:
-                    cmd += ['-O', f'force-command={cmd_opt}']
-            cmd.append(public_key_path)
-
-            result = subprocess.run(cmd, capture_output=True, text=True, check=True)
-            # ssh-keygen writes the cert at `<input-without-.pub>-cert.pub`.
+            subprocess.run(cmd, capture_output=True, text=True, check=True)
             base = public_key_path[:-4] if public_key_path.endswith('.pub') else public_key_path
             cert_path = f'{base}-cert.pub'
-
             if os.path.exists(cert_path):
-                with open(cert_path, 'r') as f:
+                with open(cert_path) as f:
                     cert_data = f.read().strip()
                 os.remove(cert_path)
                 return cert_data, str(serial)
-
-            raise Exception("Certificate generation failed")
+            raise Exception('Certificate generation failed')
         except subprocess.CalledProcessError as e:
-            raise Exception(f"SSH keygen error: {e.stderr}")
+            raise Exception(f'ssh-keygen error: {e.stderr}')
 
     def generate_host_certificate(self, public_key_path, hostnames, valid_days=365):
-        """Generate SSH host certificate"""
         if isinstance(hostnames, str):
             hostnames = [hostnames]
-
         serial = int(datetime.now().timestamp() * 1000)
-
+        cmd = [
+            'ssh-keygen', '-s', self.ca_key, '-h',
+            '-I', f'host-{serial}',
+            '-n', ','.join(hostnames),
+            '-V', f'always:+{valid_days}d',
+            '-z', str(serial),
+            public_key_path,
+        ]
         try:
-            cmd = [
-                'ssh-keygen',
-                '-s', self.ca_key,
-                '-h',  # Host certificate
-                '-I', f'host-{serial}',
-                '-n', ','.join(hostnames),
-                '-V', f'always:+{valid_days}d',
-                '-z', str(serial),
-                public_key_path
-            ]
-
-            result = subprocess.run(cmd, capture_output=True, text=True, check=True)
-            # ssh-keygen writes the cert at `<input-without-.pub>-cert.pub`.
+            subprocess.run(cmd, capture_output=True, text=True, check=True)
             base = public_key_path[:-4] if public_key_path.endswith('.pub') else public_key_path
             cert_path = f'{base}-cert.pub'
-
             if os.path.exists(cert_path):
-                with open(cert_path, 'r') as f:
+                with open(cert_path) as f:
                     cert_data = f.read().strip()
                 os.remove(cert_path)
                 return cert_data, str(serial)
-
-            raise Exception("Certificate generation failed")
+            raise Exception('Certificate generation failed')
         except subprocess.CalledProcessError as e:
-            raise Exception(f"SSH keygen error: {e.stderr}")
+            raise Exception(f'ssh-keygen error: {e.stderr}')
 
 
 cert_gen = SSHCertificateGenerator()
@@ -355,7 +461,6 @@ cert_gen = SSHCertificateGenerator()
 
 # ==================== Routes ====================
 
-# Endpoints that must remain reachable even when CA is missing.
 _CA_SETUP_ALLOWED_ENDPOINTS = {
     'login', 'logout', 'register', 'setup_ca', 'setup_totp', 'static',
     'auth_await',
@@ -371,7 +476,6 @@ _CA_SETUP_ALLOWED_ENDPOINTS = {
 
 @app.before_request
 def _redirect_admin_to_setup_when_ca_missing():
-    """If the CA isn't configured yet, push admins to /setup/ca."""
     if cert_gen.check_ca_keys():
         return
     if not current_user.is_authenticated:
@@ -383,9 +487,13 @@ def _redirect_admin_to_setup_when_ca_missing():
     return redirect(url_for('setup_ca'))
 
 
+@app.context_processor
+def inject_version():
+    return {'app_version': __version__}
+
+
 @app.route('/')
 def index():
-    """Home page"""
     if current_user.is_authenticated:
         return redirect(url_for('dashboard'))
     return redirect(url_for('login'))
@@ -394,48 +502,36 @@ def index():
 @app.route('/setup/ca', methods=['GET', 'POST'])
 @admin_required
 def setup_ca():
-    """One-time CA generation form."""
     if cert_gen.check_ca_keys():
         flash('CA is already configured.', 'info')
         return redirect(url_for('server_config'))
-
     if request.method == 'POST':
         comment = (request.form.get('comment') or 'sshadmin CA').strip()
         key_type = (request.form.get('key_type') or 'ecdsa').strip()
         bits_raw = (request.form.get('bits') or '521').strip()
-
         try:
             bits = int(bits_raw)
         except ValueError:
             flash('Bits must be a number.', 'danger')
             return redirect(url_for('setup_ca'))
-
-        valid_combos = {
-            'ecdsa': {256, 384, 521},
-            'rsa': {2048, 3072, 4096},
-            'ed25519': {0},
-        }
+        valid_combos = {'ecdsa': {256, 384, 521}, 'rsa': {2048, 3072, 4096}, 'ed25519': {0}}
         if key_type not in valid_combos:
             flash(f'Unsupported key type: {key_type}', 'danger')
             return redirect(url_for('setup_ca'))
         if key_type != 'ed25519' and bits not in valid_combos[key_type]:
             flash(f'Invalid bit length for {key_type}.', 'danger')
             return redirect(url_for('setup_ca'))
-
         try:
             cert_gen.generate_ca(key_type=key_type, bits=bits, comment=comment)
         except Exception as exc:
             flash(f'CA generation failed: {exc}', 'danger')
             return redirect(url_for('setup_ca'))
-
         flash('CA generated successfully.', 'success')
         return redirect(url_for('server_config'))
-
     return render_template('setup_ca.html', ca_key_path=cert_gen.ca_key)
 
 
 def _generate_totp_qr_svg(uri):
-    """Render a TOTP otpauth:// URI as an inline SVG (no PIL dependency)."""
     img = qrcode.make(uri, image_factory=qrcode.image.svg.SvgPathImage)
     buf = io.BytesIO()
     img.save(buf)
@@ -445,59 +541,42 @@ def _generate_totp_qr_svg(uri):
 @app.route('/setup/totp', methods=['GET', 'POST'])
 @login_required
 def setup_totp():
-    """Optional TOTP setup. User can scan QR + verify, or skip."""
     if request.method == 'POST':
         action = (request.form.get('action') or 'verify').strip()
-
         if action == 'skip':
             session.pop('pending_totp_secret', None)
-            flash('TOTP setup skipped — challenge/response is the only login method.', 'info')
+            flash('TOTP setup skipped.', 'info')
             return redirect(url_for('dashboard'))
-
         secret = session.get('pending_totp_secret')
         code = (request.form.get('code') or '').strip()
-
         if not secret:
             flash('TOTP secret expired. Restarting setup.', 'warning')
             return redirect(url_for('setup_totp'))
         if not code:
             flash('Enter the 6-digit code from your authenticator app.', 'danger')
             return redirect(url_for('setup_totp'))
-
         totp = pyotp.TOTP(secret)
         if not totp.verify(code, valid_window=1):
-            flash('Code did not match. Try again with a fresh code.', 'danger')
+            flash('Code did not match. Try again.', 'danger')
             return redirect(url_for('setup_totp'))
-
         current_user.totp_secret = secret
         current_user.totp_enabled = True
         db.session.commit()
         session.pop('pending_totp_secret', None)
-        flash('TOTP enabled. You can now log in with either your SSH key or a TOTP code.', 'success')
+        flash('TOTP enabled.', 'success')
         return redirect(url_for('dashboard'))
-
     if current_user.totp_enabled:
         flash('TOTP is already enabled. Disable it first to re-enroll.', 'info')
         return redirect(url_for('profile'))
-
     secret = session.get('pending_totp_secret')
     if not secret:
         secret = pyotp.random_base32()
         session['pending_totp_secret'] = secret
-
     uri = pyotp.totp.TOTP(secret).provisioning_uri(
-        name=current_user.username,
-        issuer_name=TOTP_ISSUER,
-    )
-    qr_svg = _generate_totp_qr_svg(uri)
-
-    return render_template(
-        'setup_totp.html',
-        secret=secret,
-        qr_svg=qr_svg,
-        otpauth_uri=uri,
-        issuer=TOTP_ISSUER,
-    )
+        name=current_user.username, issuer_name=TOTP_ISSUER)
+    return render_template('setup_totp.html', secret=secret,
+                           qr_svg=_generate_totp_qr_svg(uri),
+                           otpauth_uri=uri, issuer=TOTP_ISSUER)
 
 
 @app.route('/profile')
@@ -519,42 +598,42 @@ def disable_totp():
 @app.route('/server-config')
 @admin_required
 def server_config():
-    """Show the CA public key and other server-side settings."""
     ca_present = cert_gen.check_ca_keys()
     ca_pubkey = cert_gen.read_ca_pubkey() if ca_present else None
     fingerprint = cert_gen.ca_fingerprint() if ca_present else None
     ca_key_type = ca_pubkey.split()[0] if ca_pubkey else None
-
     counts = {
         'hosts': Host.query.count(),
         'enrolled_hosts': Host.query.filter(Host.enrolled_at.isnot(None)).count(),
-        'ssh_users': SSHUser.query.count(),
+        'credentials': UserCredential.query.count(),
         'certificates': Certificate.query.count(),
         'app_users': User.query.count(),
     }
-
     return render_template(
         'server_config.html',
-        ca_present=ca_present,
-        ca_pubkey=ca_pubkey,
-        ca_fingerprint=fingerprint,
-        ca_key_type=ca_key_type,
-        ca_key_path=cert_gen.ca_key,
-        ca_pubkey_path=cert_gen.ca_pubkey,
-        server_url=request.url_root.rstrip('/'),
-        counts=counts,
+        ca_present=ca_present, ca_pubkey=ca_pubkey,
+        ca_fingerprint=fingerprint, ca_key_type=ca_key_type,
+        ca_key_path=cert_gen.ca_key, ca_pubkey_path=cert_gen.ca_pubkey,
+        server_url=request.url_root.rstrip('/'), counts=counts,
     )
 
 
 @app.route('/register', methods=['GET', 'POST'])
 def register():
-    """User registration via SSH key challenge-response."""
+    """User registration.
+
+    Collects: sshadmin username, Unix username (OS user on their machine),
+    and SSH public key.  The Unix username is the login name that will appear
+    in the user certificate principal — it is distinct from the sshadmin
+    account name.
+    """
     if request.method == 'POST':
         username = (request.form.get('username') or '').strip()
+        unix_username = (request.form.get('unix_username') or '').strip()
         public_key = (request.form.get('public_key') or '').strip()
 
-        if not username or not public_key:
-            flash('Username and SSH public key are required.', 'danger')
+        if not username or not unix_username or not public_key:
+            flash('Account name, Unix username, and SSH public key are all required.', 'danger')
             return redirect(url_for('register'))
 
         parts = public_key.split()
@@ -571,17 +650,16 @@ def register():
             return redirect(url_for('register'))
 
         if existing and existing.completed_at is None:
-            # Reuse pending row (refresh public_key) so abandoned attempts can resume.
-            existing.public_key = public_key
             user = existing
         else:
-            user = User(username=username, public_key=public_key)
+            user = User(username=username)
             db.session.add(user)
-            db.session.flush()  # populate user.id for the Challenge FK
+            db.session.flush()
 
-        challenge = _new_challenge(user, 'register')
+        challenge = _new_challenge(user, 'register',
+                                   expected_key=public_key,
+                                   unix_username=unix_username)
         db.session.commit()
-
         session['pending_challenge_token'] = challenge.token
         return redirect(url_for('auth_await', token=challenge.token))
 
@@ -590,67 +668,47 @@ def register():
 
 @app.route('/login', methods=['GET', 'POST'])
 def login():
-    """Login via SSH key challenge-response."""
     if request.method == 'POST':
         username = (request.form.get('username') or '').strip()
         if not username:
             flash('Username is required.', 'danger')
             return redirect(url_for('login'))
-
         user = User.query.filter_by(username=username).first()
         if not user or user.completed_at is None:
-            # Same response whether the user exists or not (avoid enumeration).
             flash('No completed registration for that username.', 'danger')
             return redirect(url_for('login'))
-
         challenge = _new_challenge(user, 'login')
         db.session.commit()
-
         session['pending_challenge_token'] = challenge.token
         return redirect(url_for('auth_await', token=challenge.token))
-
     return render_template('login.html')
 
 
 @app.route('/auth/await/<token>')
 def auth_await(token):
-    """Page that displays the curl one-liner and polls for completion."""
     challenge = Challenge.query.filter_by(token=token).first_or_404()
-
     server_url = request.url_root.rstrip('/')
     one_liner_url = f"{server_url}{url_for('api_auth_script')}?token={challenge.token}"
     if challenge.purpose == 'register':
-        one_liner = f'curl -fsSL "{one_liner_url}" | sudo bash   # omit sudo to skip host enrollment'
+        one_liner = f'curl -fsSL "{one_liner_url}" | sudo bash'
     else:
         one_liner = f'curl -fsSL "{one_liner_url}" | bash'
-
     totp_available = challenge.purpose == 'login' and challenge.user.totp_enabled
-
-    # Surface the SSH alt-auth path (port + host) so the page can render the
-    # `ssh user@host` example. Host defaults to whatever the browser used to
-    # reach us, with port stripped.
     ssh_host = os.environ.get('SSHADMIN_SSH_PUBLIC_HOST') or request.host.split(':')[0]
     ssh_port = int(os.environ.get('SSHADMIN_SSH_PORT', '2222'))
     ssh_available = os.environ.get('SSHADMIN_DISABLE_SSH_AUTH', '0') != '1'
-
     return render_template(
         'auth_await.html',
-        challenge=challenge,
-        one_liner=one_liner,
-        one_liner_url=one_liner_url,
-        purpose=challenge.purpose,
-        username=challenge.user.username,
+        challenge=challenge, one_liner=one_liner, one_liner_url=one_liner_url,
+        purpose=challenge.purpose, username=challenge.user.username,
         totp_available=totp_available,
-        ssh_available=ssh_available,
-        ssh_host=ssh_host,
-        ssh_port=ssh_port,
+        ssh_available=ssh_available, ssh_host=ssh_host, ssh_port=ssh_port,
     )
 
 
 @app.route('/logout')
 @login_required
 def logout():
-    """User logout"""
     logout_user()
     flash('You have been logged out.', 'info')
     return redirect(url_for('login'))
@@ -659,40 +717,53 @@ def logout():
 @app.route('/dashboard')
 @login_required
 def dashboard():
-    """Main dashboard"""
     hosts_count = Host.query.count()
-    users_count = SSHUser.query.count()
+    creds_count = UserCredential.query.count()
     certs_count = Certificate.query.count()
     recent_certs = Certificate.query.order_by(Certificate.created_at.desc()).limit(5).all()
-
     return render_template('dashboard.html',
-                         hosts_count=hosts_count,
-                         users_count=users_count,
-                         certs_count=certs_count,
-                         recent_certs=recent_certs,
-                         ca_configured=cert_gen.check_ca_keys())
+                           hosts_count=hosts_count,
+                           credentials_count=creds_count,
+                           certs_count=certs_count,
+                           recent_certs=recent_certs,
+                           ca_configured=cert_gen.check_ca_keys())
+
+
+# ==================== Host routes ====================
+
+def _can_view_host(host):
+    if current_user.is_admin:
+        return True
+    return HostUsers.query.filter_by(
+        host_id=host.id, user_id=current_user.id).first() is not None
+
+
+def _can_admin_host(host):
+    if current_user.is_admin:
+        return True
+    hu = HostUsers.query.filter_by(
+        host_id=host.id, user_id=current_user.id).first()
+    return hu is not None and hu.role == 'owner'
 
 
 @app.route('/hosts')
 @login_required
 def hosts():
-    """Manage hosts. Non-admins see only hosts they own."""
     if current_user.is_admin:
         host_list = Host.query.order_by(Host.hostname).all()
     else:
-        host_list = list(current_user.owned_hosts)
-        host_list.sort(key=lambda h: h.hostname)
-    return render_template('hosts.html', hosts=host_list, viewing_as_admin=current_user.is_admin)
+        owned_ids = [hu.host_id for hu in current_user.host_roles]
+        host_list = Host.query.filter(Host.id.in_(owned_ids)).order_by(Host.hostname).all()
+    return render_template('hosts.html', hosts=host_list,
+                           viewing_as_admin=current_user.is_admin)
 
 
 @app.route('/hosts/add', methods=['GET', 'POST'])
 @login_required
 def add_host():
-    """Add new host (issues enrollment token; host self-registers via script)"""
     if request.method == 'POST':
         hostname = (request.form.get('hostname') or '').strip()
         description = request.form.get('description')
-
         if not hostname:
             flash('Hostname is required', 'danger')
             return redirect(url_for('add_host'))
@@ -700,45 +771,31 @@ def add_host():
         existing = Host.query.filter_by(hostname=hostname).first()
         if existing:
             if existing.is_enrolled:
-                flash(f'Host {hostname} is already enrolled. Re-register or delete it from here.', 'info')
+                flash(f'Host {hostname} is already enrolled.', 'info')
                 return redirect(url_for('host_info', host_id=existing.id))
-            # Pending host — refresh metadata, reissue token, and resume enrollment.
             if description:
                 existing.description = description
             existing.issue_enrollment_token()
-            if current_user not in existing.owners:
-                existing.owners.append(current_user)
+            _get_or_create_host_user(existing.id, current_user.id, 'owner')
             db.session.commit()
-            flash(f'Host {hostname} already had a pending enrollment; a new token was issued.', 'info')
+            flash(f'Host {hostname} already pending; new token issued.', 'info')
             return redirect(url_for('enroll_host', host_id=existing.id))
 
-        host = Host(
-            hostname=hostname,
-            description=description,
-            created_by_id=current_user.id,
-        )
+        host = Host(hostname=hostname, description=description,
+                    created_by_id=current_user.id)
         host.issue_enrollment_token()
-        host.owners.append(current_user)
         db.session.add(host)
+        db.session.flush()
+        _get_or_create_host_user(host.id, current_user.id, 'owner')
         db.session.commit()
-
         return redirect(url_for('enroll_host', host_id=host.id))
 
     return render_template('add_host.html')
 
 
-def _can_view_host(host):
-    return current_user.is_admin or current_user in host.owners
-
-
-def _can_admin_host(host):
-    return current_user.is_admin or current_user in host.owners
-
-
 @app.route('/hosts/<int:host_id>')
 @login_required
 def host_info(host_id):
-    """Show registration details for an enrolled host."""
     host = Host.query.get_or_404(host_id)
     if not _can_view_host(host):
         flash('You do not have access to this host.', 'danger')
@@ -757,102 +814,97 @@ def host_info(host_id):
                 f.write(host.public_key)
                 tmp = f.name
             try:
-                result = subprocess.run(
-                    ['ssh-keygen', '-l', '-f', tmp],
-                    capture_output=True, text=True, check=True,
-                )
+                result = subprocess.run(['ssh-keygen', '-l', '-f', tmp],
+                                        capture_output=True, text=True, check=True)
                 fingerprint = result.stdout.strip()
             finally:
                 os.unlink(tmp)
         except Exception:
             fingerprint = None
 
-    active_certs = [c for c in host.certificates if c.valid_until > datetime.utcnow()]
-    owner_ids = {o.id for o in host.owners}
+    active_certs = []
+    if host.host_key_id:
+        active_certs = [c for c in Certificate.query.filter_by(ssh_key_id=host.host_key_id).all()
+                        if c.valid_until > datetime.utcnow()]
+
+    current_hu = HostUsers.query.filter_by(host_id=host.id,
+                                            user_id=current_user.id).first()
+    existing_user_ids = {hu.user_id for hu in host.host_users}
     candidates = (
         User.query
         .filter(User.completed_at.isnot(None))
-        .filter(~User.id.in_(owner_ids) if owner_ids else True)
+        .filter(~User.id.in_(existing_user_ids) if existing_user_ids else True)
         .order_by(User.username)
         .all()
     )
     return render_template(
         'host_info.html',
-        host=host,
-        fingerprint=fingerprint,
-        key_type=key_type,
-        active_certs=active_certs,
-        share_candidates=candidates,
+        host=host, fingerprint=fingerprint, key_type=key_type,
+        active_certs=active_certs, share_candidates=candidates,
         can_admin=_can_admin_host(host),
+        current_host_user=current_hu,
     )
 
 
 @app.route('/hosts/<int:host_id>/re-register', methods=['POST'])
 @login_required
 def re_register_host(host_id):
-    """Invalidate an enrolled host's registration and issue a fresh enrollment token."""
     host = Host.query.get_or_404(host_id)
     if not _can_admin_host(host):
         flash('Only an owner or admin can re-register this host.', 'danger')
         return redirect(url_for('hosts'))
     host.issue_enrollment_token()
     db.session.commit()
-    flash(f'Host {host.hostname} registration cleared. Run the new script on the host to re-enroll.', 'warning')
+    flash(f'Host {host.hostname} registration cleared.', 'warning')
     return redirect(url_for('enroll_host', host_id=host.id))
 
 
 @app.route('/hosts/<int:host_id>/share', methods=['POST'])
 @login_required
 def share_host(host_id):
-    """Add another registered user as a co-owner of this host."""
     host = Host.query.get_or_404(host_id)
     if not _can_admin_host(host):
         flash('Only an owner or admin can share this host.', 'danger')
         return redirect(url_for('hosts'))
-
     target_user_id = request.form.get('user_id', type=int)
+    role = request.form.get('role', 'user')
+    if role not in ('owner', 'user'):
+        role = 'user'
     if not target_user_id:
-        flash('Pick a user to add as an owner.', 'danger')
+        flash('Pick a user to add.', 'danger')
         return redirect(url_for('host_info', host_id=host.id))
-
     target = db.session.get(User, target_user_id)
     if not target or target.completed_at is None:
-        flash('Target user not found or has not completed registration.', 'danger')
+        flash('Target user not found or registration incomplete.', 'danger')
         return redirect(url_for('host_info', host_id=host.id))
-
-    if target in host.owners:
-        flash(f'{target.username} is already an owner.', 'info')
-    else:
-        host.owners.append(target)
-        db.session.commit()
-        flash(f'{target.username} added as co-owner of {host.hostname}.', 'success')
+    _get_or_create_host_user(host.id, target.id, role)
+    db.session.commit()
+    flash(f'{target.username} added as {role} of {host.hostname}.', 'success')
     return redirect(url_for('host_info', host_id=host.id))
 
 
 @app.route('/hosts/<int:host_id>/unshare/<int:user_id>', methods=['POST'])
 @login_required
 def unshare_host(host_id, user_id):
-    """Remove a co-owner. Admin can remove anyone; an owner can only remove themselves."""
     host = Host.query.get_or_404(host_id)
     target = User.query.get_or_404(user_id)
-
     if not (current_user.is_admin or current_user.id == target.id):
-        flash('You may only remove yourself as an owner; ask an admin for other changes.', 'danger')
+        flash('You may only remove yourself; ask an admin for other changes.', 'danger')
         return redirect(url_for('host_info', host_id=host.id))
-
-    if target not in host.owners:
-        flash(f'{target.username} is not an owner of this host.', 'info')
+    hu = HostUsers.query.filter_by(host_id=host.id, user_id=target.id).first()
+    if not hu:
+        flash(f'{target.username} has no access to this host.', 'info')
         return redirect(url_for('host_info', host_id=host.id))
-
-    host.owners.remove(target)
-    if not host.owners:
+    db.session.delete(hu)
+    remaining = HostUsers.query.filter_by(host_id=host.id).count()
+    if remaining == 0:
         hostname = host.hostname
         db.session.delete(host)
         db.session.commit()
-        flash(f'{hostname} had no remaining owners and was deleted.', 'info')
+        flash(f'{hostname} had no remaining users and was deleted.', 'info')
         return redirect(url_for('hosts'))
     db.session.commit()
-    flash(f'{target.username} removed from {host.hostname} owners.', 'info')
+    flash(f'{target.username} removed from {host.hostname}.', 'info')
     if target.id == current_user.id:
         return redirect(url_for('hosts'))
     return redirect(url_for('host_info', host_id=host.id))
@@ -861,73 +913,35 @@ def unshare_host(host_id, user_id):
 @app.route('/hosts/<int:host_id>/enroll')
 @login_required
 def enroll_host(host_id):
-    """Show the bash enrollment script for a pending host."""
     host = Host.query.get_or_404(host_id)
-
     if host.is_enrolled:
         flash(f'Host {host.hostname} is already enrolled.', 'info')
         return redirect(url_for('hosts'))
-
     if not host.enrollment_token or host.enrollment_expires_at < datetime.utcnow():
         host.issue_enrollment_token()
         db.session.commit()
         flash('Enrollment token expired; a new one was issued.', 'info')
-
     server_url = request.url_root.rstrip('/')
     script = render_template(
         'enrollment_script.sh',
-        server_url=server_url,
-        token=host.enrollment_token,
-        hostname=host.hostname,
-        key_type=ALLOWED_HOST_KEY_TYPE,
+        server_url=server_url, token=host.enrollment_token,
+        hostname=host.hostname, key_type=ALLOWED_HOST_KEY_TYPE,
     )
-    one_liner_url = (
-        f"{server_url}{url_for('api_enroll_script')}"
-        f"?token={host.enrollment_token}&host_id={host.id}"
-    )
-    one_liner = f'curl -fsSL "{one_liner_url}" | sudo bash'
-
+    one_liner_url = (f"{server_url}{url_for('api_enroll_script')}"
+                     f"?token={host.enrollment_token}&host_id={host.id}")
     return render_template(
-        'enroll_host.html',
-        host=host,
-        script=script,
-        one_liner=one_liner,
+        'enroll_host.html', host=host, script=script,
+        one_liner=f'curl -fsSL "{one_liner_url}" | sudo bash',
         expires_at=host.enrollment_expires_at,
-    )
-
-
-@app.route('/hosts/<int:host_id>/enroll/script')
-@login_required
-def enroll_host_script(host_id):
-    """Download the enrollment script as a .sh file."""
-    host = Host.query.get_or_404(host_id)
-    if host.is_enrolled or not host.enrollment_token:
-        flash('No active enrollment for this host.', 'danger')
-        return redirect(url_for('hosts'))
-
-    server_url = request.url_root.rstrip('/')
-    script = render_template(
-        'enrollment_script.sh',
-        server_url=server_url,
-        token=host.enrollment_token,
-        hostname=host.hostname,
-        key_type=ALLOWED_HOST_KEY_TYPE,
-    )
-    from flask import Response
-    return Response(
-        script,
-        mimetype='text/x-shellscript',
-        headers={'Content-Disposition': f'attachment; filename=enroll-{host.hostname}.sh'},
     )
 
 
 @app.route('/hosts/<int:host_id>/enroll/regenerate', methods=['POST'])
 @login_required
 def regenerate_enrollment(host_id):
-    """Issue a fresh enrollment token for a pending host."""
     host = Host.query.get_or_404(host_id)
     if host.is_enrolled:
-        flash('Host is already enrolled; cannot regenerate token.', 'danger')
+        flash('Host is already enrolled.', 'danger')
         return redirect(url_for('hosts'))
     host.issue_enrollment_token()
     db.session.commit()
@@ -938,136 +952,154 @@ def regenerate_enrollment(host_id):
 @app.route('/hosts/<int:host_id>/delete', methods=['POST'])
 @login_required
 def delete_host(host_id):
-    """Delete host.
-
-    - Admin: wipes the host (and certs) outright.
-    - Non-admin owner: removes only their ownership row; the host itself is
-      deleted only when the last remaining owner removes themselves.
-    """
     host = Host.query.get_or_404(host_id)
     hostname = host.hostname
-
     if current_user.is_admin:
         db.session.delete(host)
         db.session.commit()
-        flash(f'Host {hostname} deleted (admin wipe).', 'info')
+        flash(f'Host {hostname} deleted.', 'info')
         return redirect(url_for('hosts'))
-
-    if current_user not in host.owners:
-        flash('You are not an owner of this host.', 'danger')
+    hu = HostUsers.query.filter_by(host_id=host.id, user_id=current_user.id).first()
+    if not hu:
+        flash('You are not associated with this host.', 'danger')
         return redirect(url_for('hosts'))
-
-    host.owners.remove(current_user)
-    if not host.owners:
+    db.session.delete(hu)
+    remaining = HostUsers.query.filter_by(host_id=host.id).count()
+    if remaining == 0:
         db.session.delete(host)
         db.session.commit()
-        flash(f'{hostname} had no other owners; it was removed entirely.', 'info')
+        flash(f'{hostname} had no other users; it was removed.', 'info')
     else:
         db.session.commit()
-        flash(
-            f'You no longer own {hostname}. {len(host.owners)} other owner(s) still have access.',
-            'info',
-        )
+        flash(f'You no longer have access to {hostname}.', 'info')
     return redirect(url_for('hosts'))
 
 
-@app.route('/users')
+# ==================== Credential routes (replaces SSH User routes) ====================
+
+@app.route('/credentials')
 @login_required
-def users():
-    """Manage SSH users. Non-admins see only ones they created."""
+def credentials():
+    """List SSH User Keys (credentials). Non-admins see only their own."""
     if current_user.is_admin:
-        ssh_users = SSHUser.query.order_by(SSHUser.username).all()
+        cred_list = UserCredential.query.order_by(UserCredential.created_at.desc()).all()
     else:
-        ssh_users = (
-            SSHUser.query.filter_by(created_by_id=current_user.id)
-            .order_by(SSHUser.username)
-            .all()
-        )
-    return render_template('users.html', users=ssh_users, viewing_as_admin=current_user.is_admin)
+        cred_list = current_user.credentials
+    return render_template('credentials.html', credentials=cred_list,
+                           viewing_as_admin=current_user.is_admin)
 
 
-@app.route('/users/add', methods=['GET', 'POST'])
+@app.route('/credentials/add', methods=['GET', 'POST'])
 @login_required
-def add_user():
-    """Add new SSH user"""
+def add_credential():
+    """Manually add an SSH User Key credential (admin or owner of the selected host)."""
+    enrolled_hosts = [h for h in Host.query.all() if h.is_enrolled]
+    if not current_user.is_admin:
+        enrolled_hosts = [h for h in enrolled_hosts if _can_admin_host(h)]
+
     if request.method == 'POST':
-        username = request.form.get('username')
-        description = request.form.get('description')
-        public_key = request.form.get('public_key')
+        host_id = request.form.get('host_id', type=int)
+        unix_username = (request.form.get('unix_username') or '').strip()
+        public_key = (request.form.get('public_key') or '').strip()
 
-        if not username or not public_key:
-            flash('Username and public key are required', 'danger')
-            return redirect(url_for('add_user'))
+        if not host_id or not unix_username or not public_key:
+            flash('Host, Unix username, and public key are required.', 'danger')
+            return redirect(url_for('add_credential'))
 
-        existing = SSHUser.query.filter_by(username=username, public_key=public_key).first()
-        if existing:
-            flash('SSH user with this key already exists', 'danger')
-            return redirect(url_for('add_user'))
+        key_parts = public_key.split()
+        if len(key_parts) < 2 or key_parts[0] not in ALLOWED_USER_KEY_TYPES:
+            flash(f'Key type must be one of: {", ".join(ALLOWED_USER_KEY_TYPES)}', 'danger')
+            return redirect(url_for('add_credential'))
 
-        user = SSHUser(
-            username=username,
-            description=description,
-            public_key=public_key,
-            created_by_id=current_user.id
+        host = Host.query.get_or_404(host_id)
+        if not _can_admin_host(host):
+            flash('You must be an owner of the selected host.', 'danger')
+            return redirect(url_for('add_credential'))
+
+        # Duplicate key detection
+        user_ssh_key = _get_or_create_ssh_key(public_key, 'user')
+        db.session.flush()
+        existing_cred = UserCredential.query.filter_by(user_key_id=user_ssh_key.id).first()
+        if existing_cred and existing_cred.user_id != current_user.id:
+            flash('This public key is already registered to another account.', 'danger')
+            return redirect(url_for('add_credential'))
+        if existing_cred:
+            flash('This key is already registered as a credential.', 'info')
+            return redirect(url_for('credentials'))
+
+        hu = _get_or_create_host_user(host.id, current_user.id, 'user')
+        db.session.flush()
+        cred = UserCredential(
+            user_id=current_user.id,
+            user_key_id=user_ssh_key.id,
+            host_user_id=hu.id,
+            unix_username=unix_username,
         )
-        db.session.add(user)
+        db.session.add(cred)
         db.session.commit()
+        flash(f'SSH User Key added for {unix_username}@{host.hostname}.', 'success')
+        return redirect(url_for('credentials'))
 
-        flash(f'SSH user {username} added successfully', 'success')
-        return redirect(url_for('users'))
-
-    return render_template('add_user.html')
+    return render_template('add_credential.html', hosts=enrolled_hosts,
+                           allowed_key_types=ALLOWED_USER_KEY_TYPES)
 
 
-@app.route('/users/<int:user_id>/delete', methods=['POST'])
+@app.route('/credentials/<int:cred_id>/delete', methods=['POST'])
 @login_required
-def delete_user(user_id):
-    """Delete SSH user — only the creator or an admin may delete."""
-    user = SSHUser.query.get_or_404(user_id)
-    if not (current_user.is_admin or user.created_by_id == current_user.id):
-        flash('You can only delete SSH users you created.', 'danger')
-        return redirect(url_for('users'))
-    username = user.username
-    db.session.delete(user)
+def delete_credential(cred_id):
+    cred = UserCredential.query.get_or_404(cred_id)
+    if not (current_user.is_admin or cred.user_id == current_user.id):
+        flash('You can only delete your own credentials.', 'danger')
+        return redirect(url_for('credentials'))
+    db.session.delete(cred)
     db.session.commit()
-    flash(f'SSH user {username} deleted', 'info')
-    return redirect(url_for('users'))
+    flash('SSH User Key deleted.', 'info')
+    return redirect(url_for('credentials'))
 
+
+# ==================== Certificate routes ====================
 
 @app.route('/certificates')
 @login_required
 def certificates():
-    """View certificates. Non-admins see certs for SSH users they created."""
     q = Certificate.query.order_by(Certificate.created_at.desc())
     if not current_user.is_admin:
-        owned_ids = [u.id for u in SSHUser.query.filter_by(created_by_id=current_user.id)]
-        q = q.filter(Certificate.user_id.in_(owned_ids))
+        my_key_ids = [c.user_key_id for c in current_user.credentials]
+        my_host_key_ids = [hu.host.host_key_id for hu in current_user.host_roles
+                           if hu.host.host_key_id and hu.role == 'owner']
+        visible = my_key_ids + my_host_key_ids
+        q = q.filter(Certificate.ssh_key_id.in_(visible)) if visible else q.filter(False)
     ssh_port = app.config.get('SSHADMIN_SSH_PORT',
                               int(os.environ.get('SSHADMIN_SSH_PORT', 2222)))
     return render_template('certificates.html', certificates=q.all(),
                            viewing_as_admin=current_user.is_admin,
-                           now=datetime.utcnow(),
-                           ssh_port=ssh_port)
+                           now=datetime.utcnow(), ssh_port=ssh_port)
 
 
 @app.route('/certificates/issue/user', methods=['GET', 'POST'])
-@admin_required
+@login_required
 def issue_user_cert():
-    """Issue user certificate. Admin only."""
-    ssh_users = SSHUser.query.order_by(SSHUser.username).all()
+    """Issue a user certificate for a credential."""
+    if current_user.is_admin:
+        cred_list = UserCredential.query.order_by(UserCredential.unix_username).all()
+    else:
+        cred_list = current_user.credentials
 
     if request.method == 'POST':
-        user_id = request.form.get('user_id')
+        cred_id = request.form.get('credential_id', type=int)
         valid_days = int(request.form.get('valid_days', 365))
-        principals = request.form.get('principals', '').strip().split(',')
-        principals = [p.strip() for p in principals if p.strip()]
+        principals_raw = request.form.get('principals', '').strip()
         source_address = request.form.get('source_address', '').strip()
         force_command = request.form.get('force_command', '').strip()
 
-        ssh_user = SSHUser.query.get_or_404(user_id)
+        cred = UserCredential.query.get_or_404(cred_id)
+        if not current_user.is_admin and cred.user_id != current_user.id:
+            flash('You can only issue certificates for your own credentials.', 'danger')
+            return redirect(url_for('issue_user_cert'))
 
+        principals = [p.strip() for p in principals_raw.split(',') if p.strip()]
         if not principals:
-            principals = [ssh_user.username]
+            principals = [cred.unix_username]
 
         critical_options = {}
         if source_address:
@@ -1076,152 +1108,88 @@ def issue_user_cert():
             critical_options['force-command'] = force_command
 
         try:
-            # Create temporary file with public key
-            with tempfile.NamedTemporaryFile(mode='w', delete=False, suffix='.pub') as f:
-                f.write(ssh_user.public_key)
-                temp_key = f.name
-
-            try:
-                cert_data, serial = cert_gen.generate_user_certificate(
-                    temp_key,
-                    ssh_user.username,
-                    valid_days,
-                    principals,
-                    critical_options or None,
-                )
-
-                cert = Certificate(
-                    cert_type='user',
-                    user_id=ssh_user.id,
-                    public_key=ssh_user.public_key,
-                    serial=serial,
-                    valid_from=datetime.utcnow(),
-                    valid_until=datetime.utcnow() + timedelta(days=valid_days),
-                    created_by_id=current_user.id,
-                    certificate_data=cert_data
-                )
-                cert.issue_install_token()
-                db.session.add(cert)
-                db.session.commit()
-
-                flash(f'User certificate issued for {ssh_user.username}', 'success')
-                return redirect(url_for('cert_install', cert_id=cert.id))
-            finally:
-                os.unlink(temp_key)
+            cert_data = _do_issue_user_cert(
+                cred, current_user.id, principals, valid_days,
+                critical_options or None)
+            db.session.commit()
+            flash(f'User certificate issued for {cred.unix_username}@{cred.host.hostname}', 'success')
+            cert = Certificate.query.filter_by(
+                ssh_key_id=cred.user_key_id
+            ).order_by(Certificate.created_at.desc()).first()
+            return redirect(url_for('cert_install', cert_id=cert.id))
         except Exception as e:
-            flash(f'Error issuing certificate: {str(e)}', 'danger')
+            flash(f'Error issuing certificate: {e}', 'danger')
 
-    return render_template('issue_user_cert.html', users=ssh_users)
+    return render_template('issue_user_cert.html', credentials=cred_list)
 
 
 @app.route('/certificates/issue/host', methods=['GET', 'POST'])
 @login_required
 def issue_host_cert():
-    """Issue host certificate. Non-admins limited to hosts they own."""
+    """Issue a host certificate."""
     if current_user.is_admin:
-        hosts = [h for h in Host.query.all() if h.is_enrolled]
+        host_list = [h for h in Host.query.all() if h.is_enrolled]
     else:
-        hosts = [h for h in current_user.owned_hosts if h.is_enrolled]
+        host_list = [h for h in Host.query.all()
+                     if h.is_enrolled and _can_admin_host(h)]
 
     if request.method == 'POST':
-        host_id = request.form.get('host_id')
+        host_id = request.form.get('host_id', type=int)
         valid_days = int(request.form.get('valid_days', 365))
-
         host = Host.query.get_or_404(host_id)
-
         if not host.is_enrolled:
             flash(f'Host {host.hostname} has not completed enrollment.', 'danger')
             return redirect(url_for('issue_host_cert'))
-
         if not _can_admin_host(host):
             flash('You can only issue certificates for hosts you own.', 'danger')
             return redirect(url_for('issue_host_cert'))
-
         try:
-            with tempfile.NamedTemporaryFile(mode='w', delete=False, suffix='.pub') as f:
-                f.write(host.public_key)
-                temp_key = f.name
-
-            try:
-                cert_data, serial = cert_gen.generate_host_certificate(
-                    temp_key,
-                    host.hostname,
-                    valid_days
-                )
-
-                cert = Certificate(
-                    cert_type='host',
-                    host_id=host.id,
-                    public_key=host.public_key,
-                    serial=serial,
-                    valid_from=datetime.utcnow(),
-                    valid_until=datetime.utcnow() + timedelta(days=valid_days),
-                    created_by_id=current_user.id,
-                    certificate_data=cert_data
-                )
-                cert.issue_install_token()
-                db.session.add(cert)
-                db.session.commit()
-
-                flash(f'Host certificate issued for {host.hostname}', 'success')
-                return redirect(url_for('cert_install', cert_id=cert.id))
-            finally:
-                os.unlink(temp_key)
+            _do_issue_host_cert(host, current_user.id, valid_days)
+            db.session.commit()
+            flash(f'Host certificate issued for {host.hostname}', 'success')
+            cert = Certificate.query.filter_by(
+                ssh_key_id=host.host_key_id
+            ).order_by(Certificate.created_at.desc()).first()
+            return redirect(url_for('cert_install', cert_id=cert.id))
         except Exception as e:
-            flash(f'Error issuing certificate: {str(e)}', 'danger')
+            flash(f'Error issuing certificate: {e}', 'danger')
 
-    return render_template('issue_host_cert.html', hosts=hosts)
+    return render_template('issue_host_cert.html', hosts=host_list)
 
 
 @app.route('/certificates/<int:cert_id>/download')
 @login_required
 def download_cert(cert_id):
-    """Return the OpenSSH-format certificate as a file."""
     cert = Certificate.query.get_or_404(cert_id)
-    if not (current_user.is_admin or cert.created_by_id == current_user.id
-            or (cert.user and cert.user.created_by_id == current_user.id)):
-        flash('You do not have access to this certificate.', 'danger')
-        return redirect(url_for('certificates'))
     if not cert.certificate_data:
         flash('Certificate has no data on file.', 'danger')
         return redirect(url_for('certificates'))
-    name = (cert.host.hostname if cert.cert_type == 'host' and cert.host
-            else (cert.user.username if cert.user else cert.serial))
+    if cert.cert_type == 'host':
+        name = cert.host.hostname if cert.host else cert.serial
+    else:
+        cred = cert.credential
+        name = f'{cred.unix_username}-{cred.host.hostname}' if cred else cert.serial
     filename = f'sshadmin-{cert.cert_type}-{name}-cert.pub'
-    return Response(
-        cert.certificate_data + '\n',
-        mimetype='text/plain',
-        headers={'Content-Disposition': f'attachment; filename={filename}'},
-    )
+    return Response(cert.certificate_data + '\n', mimetype='text/plain',
+                    headers={'Content-Disposition': f'attachment; filename={filename}'})
 
 
 @app.route('/certificates/<int:cert_id>/install')
 @login_required
 def cert_install(cert_id):
-    """Show the install one-liner + manual instructions for a certificate."""
     cert = Certificate.query.get_or_404(cert_id)
-    if not (current_user.is_admin or cert.created_by_id == current_user.id
-            or (cert.user and cert.user.created_by_id == current_user.id)):
-        flash('You do not have access to this certificate.', 'danger')
-        return redirect(url_for('certificates'))
-
     if not cert.install_token or (
         cert.install_token_expires_at and cert.install_token_expires_at < datetime.utcnow()
     ):
         cert.issue_install_token()
         db.session.commit()
         flash('Install token expired; a fresh one was issued.', 'info')
-
     server_url = request.url_root.rstrip('/')
-    install_url = (
-        f"{server_url}{url_for('api_cert_install_script')}"
-        f"?token={cert.install_token}"
-    )
-    if cert.cert_type == 'host':
-        one_liner = f'curl -fsSL "{install_url}" | sudo bash'
-    else:
-        one_liner = f'curl -fsSL "{install_url}" | bash'
-
+    install_url = (f"{server_url}{url_for('api_cert_install_script')}"
+                   f"?token={cert.install_token}")
+    one_liner = (f'curl -fsSL "{install_url}" | sudo bash'
+                 if cert.cert_type == 'host'
+                 else f'curl -fsSL "{install_url}" | bash')
     fingerprint = None
     try:
         with tempfile.NamedTemporaryFile(mode='w', delete=False, suffix='-cert.pub') as f:
@@ -1234,25 +1202,22 @@ def cert_install(cert_id):
         finally:
             os.unlink(tmp)
     except Exception:
-        fingerprint = None
-
-    target_name = (cert.host.hostname if cert.cert_type == 'host' and cert.host
-                   else (cert.user.username if cert.user else 'unknown'))
+        pass
+    if cert.cert_type == 'host':
+        target_name = cert.host.hostname if cert.host else 'unknown'
+    else:
+        cred = cert.credential
+        target_name = f'{cred.unix_username}@{cred.host.hostname}' if cred else 'unknown'
     return render_template(
-        'cert_install.html',
-        cert=cert,
-        one_liner=one_liner,
-        install_url=install_url,
-        target_name=target_name,
-        fingerprint=fingerprint,
-        ttl_hours=2,
+        'cert_install.html', cert=cert, one_liner=one_liner,
+        install_url=install_url, target_name=target_name,
+        fingerprint=fingerprint, ttl_hours=2,
     )
 
 
-# ===== Public install endpoints (token-gated, no session required) =====
+# ==================== Public install endpoints ====================
 
 def _lookup_install_cert(token):
-    """Returns (cert, error_response_or_None)."""
     if not token:
         return None, ('# token query parameter required\n', 400, {'Content-Type': 'text/plain'})
     cert = Certificate.query.filter_by(install_token=token).first()
@@ -1265,30 +1230,29 @@ def _lookup_install_cert(token):
 
 @app.route('/api/cert/install/data')
 def api_cert_install_data():
-    """Return the certificate body in OpenSSH format. Token-gated; single-use lookup."""
     token = (request.args.get('token') or '').strip()
     cert, err = _lookup_install_cert(token)
     if err is not None:
         return err
-    body = (cert.certificate_data or '').strip() + '\n'
-    return Response(body, mimetype='text/plain; charset=utf-8')
+    return Response((cert.certificate_data or '').strip() + '\n',
+                    mimetype='text/plain; charset=utf-8')
 
 
 @app.route('/api/cert/install/script')
 def api_cert_install_script():
-    """Return a bash script that installs the certificate at the right path."""
     token = (request.args.get('token') or '').strip()
     cert, err = _lookup_install_cert(token)
     if err is not None:
         return err
-
-    target_name = (cert.host.hostname if cert.cert_type == 'host' and cert.host
-                   else (cert.user.username if cert.user else 'unknown'))
+    if cert.cert_type == 'host':
+        target_name = cert.host.hostname if cert.host else 'unknown'
+    else:
+        cred = cert.credential
+        target_name = cred.unix_username if cred else 'unknown'
     server_url = request.url_root.rstrip('/')
     script = render_template(
         'cert_install_script.sh',
-        server_url=server_url,
-        token=cert.install_token,
+        server_url=server_url, token=cert.install_token,
         cert_type=cert.cert_type,
         cert_pubkey_line=(cert.public_key or '').strip(),
         target_name=target_name,
@@ -1296,20 +1260,11 @@ def api_cert_install_script():
     return Response(script, mimetype='text/x-shellscript; charset=utf-8')
 
 
-def _latest_valid_cert(cert_type, **filter_kwargs):
-    """Return the most-recently-issued still-valid Certificate matching the filters."""
-    return (Certificate.query
-            .filter_by(cert_type=cert_type, **filter_kwargs)
-            .filter(Certificate.valid_until > datetime.utcnow())
-            .order_by(Certificate.created_at.desc())
-            .first())
-
-
-@app.route('/api/cert/user/<username>')
-def api_cert_user(username):
-    """Public: return the latest valid user certificate in OpenSSH format."""
-    sshuser = SSHUser.query.filter_by(username=username).first_or_404()
-    cert = _latest_valid_cert('user', user_id=sshuser.id)
+@app.route('/api/cert/user/<unix_username>')
+def api_cert_user(unix_username):
+    """Public: latest valid user cert for a unix username."""
+    cred = UserCredential.query.filter_by(unix_username=unix_username).first_or_404()
+    cert = _latest_valid_cert_for_key(cred.user_key_id)
     if not cert or not cert.certificate_data:
         return Response('# no valid certificate\n', status=404, mimetype='text/plain')
     return Response(cert.certificate_data.strip() + '\n', mimetype='text/plain; charset=utf-8')
@@ -1317,9 +1272,11 @@ def api_cert_user(username):
 
 @app.route('/api/cert/host/<path:hostname>')
 def api_cert_host(hostname):
-    """Public: return the latest valid host certificate in OpenSSH format."""
+    """Public: latest valid host cert for a hostname."""
     host = Host.query.filter_by(hostname=hostname).first_or_404()
-    cert = _latest_valid_cert('host', host_id=host.id)
+    if not host.host_key_id:
+        return Response('# host not enrolled\n', status=404, mimetype='text/plain')
+    cert = _latest_valid_cert_for_key(host.host_key_id)
     if not cert or not cert.certificate_data:
         return Response('# no valid certificate\n', status=404, mimetype='text/plain')
     return Response(cert.certificate_data.strip() + '\n', mimetype='text/plain; charset=utf-8')
@@ -1327,7 +1284,6 @@ def api_cert_host(hostname):
 
 @app.route('/download/sshadmin_add')
 def download_sshadmin_add():
-    """Download the sshadmin_add enrollment helper script."""
     ssh_host = request.host.split(':')[0]
     ssh_port = app.config.get('SSHADMIN_SSH_PORT',
                               int(os.environ.get('SSHADMIN_SSH_PORT', 2222)))
@@ -1336,39 +1292,20 @@ def download_sshadmin_add():
                     headers={'Content-Disposition': 'attachment; filename=sshadmin_add'})
 
 
-def _ssh_get_cert(subject: str):
-    """Look up the latest valid cert for subject (hostname tried first, then username)."""
-    with app.app_context():
-        host = Host.query.filter_by(hostname=subject).first()
-        if host:
-            cert = _latest_valid_cert('host', host_id=host.id)
-            if cert and cert.certificate_data:
-                return cert.certificate_data.strip() + '\n'
-        sshuser = SSHUser.query.filter_by(username=subject).first()
-        if sshuser:
-            cert = _latest_valid_cert('user', user_id=sshuser.id)
-            if cert and cert.certificate_data:
-                return cert.certificate_data.strip() + '\n'
-    return None
-
+# ==================== Auth (challenge/response) API ====================
 
 @app.route('/api/ca-status')
 @login_required
 def api_ca_status():
-    """Check CA key status"""
-    has_ca = cert_gen.check_ca_keys()
-    return jsonify({'ca_available': has_ca})
+    return jsonify({'ca_available': cert_gen.check_ca_keys()})
 
-
-# ==================== Auth (challenge/response) API ====================
 
 @app.route('/api/auth/script')
 def api_auth_script():
-    """Public endpoint: returns the bash sign-and-submit script for an active challenge."""
+    """Return the bash sign-and-submit script for an active challenge."""
     token = (request.args.get('token') or '').strip()
     if not token:
         return ('# token query parameter required\n', 400, {'Content-Type': 'text/plain'})
-
     challenge = Challenge.query.filter_by(token=token).first()
     if not challenge:
         return ('# unknown challenge token\n', 404, {'Content-Type': 'text/plain'})
@@ -1376,6 +1313,12 @@ def api_auth_script():
         return ('# challenge already consumed\n', 409, {'Content-Type': 'text/plain'})
     if challenge.expires_at < datetime.utcnow():
         return ('# challenge expired\n', 410, {'Content-Type': 'text/plain'})
+
+    # Build the list of acceptable public keys for this challenge.
+    if challenge.purpose == 'register':
+        pubkeys = [challenge.expected_key] if challenge.expected_key else []
+    else:
+        pubkeys = [c.user_key.public_key for c in challenge.user.credentials]
 
     server_url = request.url_root.rstrip('/')
     script = render_template(
@@ -1385,17 +1328,16 @@ def api_auth_script():
         nonce=challenge.nonce,
         username=challenge.user.username,
         purpose=challenge.purpose,
-        public_key=challenge.user.public_key,
+        pubkeys=pubkeys,
         sshsig_namespace=SSHSIG_NAMESPACE,
         host_key_type=ALLOWED_HOST_KEY_TYPE,
-        include_host_enrollment=(challenge.purpose == 'register'),
     )
     return (script, 200, {'Content-Type': 'text/x-shellscript; charset=utf-8'})
 
 
 @app.route('/api/challenge_response', methods=['POST'])
 def api_challenge_response():
-    """Accept a signature for an active challenge; optionally enroll host."""
+    """Accept a signature; for registration also expects hostname + host_public_key."""
     payload = request.get_json(silent=True) or request.form
     token = (payload.get('token') or '').strip()
     signature = (payload.get('signature') or '')
@@ -1413,21 +1355,33 @@ def api_challenge_response():
     if challenge.expires_at < datetime.utcnow():
         return jsonify({'ok': False, 'error': 'challenge expired'}), 410
 
-    if not verify_sshsig(challenge.user.public_key, signature, challenge.nonce):
-        return jsonify({'ok': False, 'error': 'signature verification failed'}), 403
+    if challenge.purpose == 'register':
+        # Registration: verify against the single declared key.
+        if not challenge.expected_key:
+            return jsonify({'ok': False, 'error': 'no expected key on challenge'}), 500
+        if not verify_sshsig(challenge.expected_key, signature, challenge.nonce):
+            return jsonify({'ok': False, 'error': 'signature verification failed'}), 403
+        if not hostname or not host_pubkey:
+            return jsonify({
+                'ok': False,
+                'error': 'hostname and host_public_key required for registration; '
+                         'run the full auth script (sudo bash) to enroll your host',
+            }), 400
+    else:
+        # Login: try each credential key.
+        verified_key = None
+        verified_cred = None
+        for cred in challenge.user.credentials:
+            if verify_sshsig(cred.user_key.public_key, signature, challenge.nonce):
+                verified_key = cred.user_key.public_key
+                verified_cred = cred
+                break
+        if verified_cred is None:
+            return jsonify({'ok': False, 'error': 'signature verification failed'}), 403
+        challenge.credential_id = verified_cred.id
 
     challenge.consumed_at = datetime.utcnow()
-
-    _finalize_consumed_challenge(challenge)
-
-    host_result = {'enrolled': False}
-    if hostname and host_pubkey:
-        host_result = _try_enroll_host_during_register(
-            user=challenge.user,
-            hostname=hostname,
-            host_pubkey=host_pubkey,
-        )
-
+    host_result = _finalize_consumed_challenge(challenge, hostname, host_pubkey)
     db.session.commit()
 
     return jsonify({
@@ -1438,53 +1392,272 @@ def api_challenge_response():
     })
 
 
-def _do_issue_host_cert(host, requester_id, valid_days=365):
-    """Issue a host certificate, persist it, and return certificate_data.
+def _finalize_consumed_challenge(challenge, hostname=None, host_pubkey=None):
+    """Side effects after a challenge is consumed.
 
-    Caller is responsible for verifying authentication and authorization
-    before calling this function — it performs no auth checks of its own.
+    For login: no-op (just returns).
+    For registration: creates SSHKey (host + user), Host, HostUsers, UserCredential,
+    sets completed_at, promotes first user to admin.
+    Caller must commit.
     """
+    if challenge.purpose != 'register':
+        return {'enrolled': False}
+    if challenge.user.completed_at is not None:
+        return {'enrolled': False, 'reason': 'already completed'}
+
+    # Validate host key type
+    if not host_pubkey or not host_pubkey.startswith(ALLOWED_HOST_KEY_TYPE + ' '):
+        return {'enrolled': False,
+                'reason': f'host key must be {ALLOWED_HOST_KEY_TYPE}'}
+
+    # ── Host SSH key ──────────────────────────────────────────────────────────
+    host_ssh_key = _get_or_create_ssh_key(host_pubkey, 'host')
+    db.session.flush()
+
+    # ── Host ─────────────────────────────────────────────────────────────────
+    shared = False
+    host = Host.query.filter_by(host_key_id=host_ssh_key.id).first()
+    if host is not None:
+        # Existing host with matching key: add this user as a co-user.
+        shared = True
+    else:
+        if hostname:
+            host = Host.query.filter_by(hostname=hostname).first()
+        if host is not None and host.host_key_id is not None:
+            # Same hostname but different key: registration completes but we
+            # can't add this user to the host without an admin resolving it.
+            challenge.user.completed_at = datetime.utcnow()
+            if User.query.filter(User.completed_at.isnot(None),
+                                 User.is_admin == True).first() is None:  # noqa: E712
+                challenge.user.is_admin = True
+            return {'enrolled': False,
+                    'reason': (f'host {hostname!r} already enrolled with a different public key; '
+                               'contact an owner or admin to add your key manually')}
+        if host is None:
+            host = Host(
+                hostname=hostname or 'unknown',
+                created_by_id=challenge.user.id,
+                host_key_id=host_ssh_key.id,
+                enrolled_at=datetime.utcnow(),
+            )
+            db.session.add(host)
+        else:
+            # Pending host (same name, no key yet): enroll it now.
+            host.host_key_id = host_ssh_key.id
+            host.enrolled_at = datetime.utcnow()
+    db.session.flush()
+
+    # ── HostUsers (role='user' — web registration doesn't prove ownership) ───
+    hu = _get_or_create_host_user(host.id, challenge.user.id, 'user')
+    db.session.flush()
+
+    # ── User SSH key ──────────────────────────────────────────────────────────
+    expected_key = challenge.expected_key
+    user_ssh_key = _get_or_create_ssh_key(expected_key, 'user')
+    db.session.flush()
+
+    # Duplicate-key guard
+    existing_cred = UserCredential.query.filter_by(user_key_id=user_ssh_key.id).first()
+    if existing_cred and existing_cred.user_id != challenge.user.id:
+        return {'enrolled': False,
+                'reason': 'this SSH key is already registered to another account'}
+
+    # ── UserCredential ────────────────────────────────────────────────────────
+    if existing_cred is None:
+        cred = UserCredential(
+            user_id=challenge.user.id,
+            user_key_id=user_ssh_key.id,
+            host_user_id=hu.id,
+            unix_username=challenge.unix_username or challenge.user.username,
+        )
+        db.session.add(cred)
+
+    # ── Promote first user to admin, mark completed ───────────────────────────
+    existing_admin = User.query.filter(
+        User.completed_at.isnot(None), User.is_admin == True  # noqa: E712
+    ).first()
+    if existing_admin is None:
+        challenge.user.is_admin = True
+    challenge.user.completed_at = datetime.utcnow()
+
+    result = {'enrolled': True, 'hostname': host.hostname}
+    if shared:
+        result['shared'] = True
+    return result
+
+
+@app.route('/api/totp_response', methods=['POST'])
+def api_totp_response():
+    payload = request.get_json(silent=True) or request.form
+    token = (payload.get('token') or '').strip()
+    code = (payload.get('code') or '').strip()
+    if not token or not code:
+        return jsonify({'ok': False, 'error': 'token and code required'}), 400
+    challenge = Challenge.query.filter_by(token=token).first()
+    if not challenge:
+        return jsonify({'ok': False, 'error': 'invalid token'}), 404
+    if challenge.consumed_at is not None:
+        return jsonify({'ok': False, 'error': 'challenge already used'}), 409
+    if challenge.expires_at < datetime.utcnow():
+        return jsonify({'ok': False, 'error': 'challenge expired'}), 410
+    if challenge.purpose != 'login':
+        return jsonify({'ok': False, 'error': 'TOTP can only be used for login'}), 403
+    user = challenge.user
+    if not user.totp_enabled or not user.totp_secret:
+        return jsonify({'ok': False, 'error': 'TOTP is not enabled for this user'}), 403
+    if not pyotp.TOTP(user.totp_secret).verify(code, valid_window=1):
+        return jsonify({'ok': False, 'error': 'invalid code'}), 403
+    challenge.consumed_at = datetime.utcnow()
+    db.session.commit()
+    return jsonify({'ok': True, 'username': user.username})
+
+
+@app.route('/api/auth_status/<token>')
+def api_auth_status(token):
+    challenge = Challenge.query.filter_by(token=token).first()
+    if not challenge:
+        return jsonify({'status': 'unknown'}), 404
+    if challenge.expires_at < datetime.utcnow() and challenge.consumed_at is None:
+        return jsonify({'status': 'expired'})
+    if challenge.consumed_at is None:
+        return jsonify({'status': 'pending'})
+    if session.get('pending_challenge_token') != token:
+        return jsonify({'status': 'completed_other_session'})
+    user = challenge.user
+    if user.completed_at is None:
+        return jsonify({'status': 'pending'})
+    login_user(user)
+    session.pop('pending_challenge_token', None)
+    if challenge.purpose == 'register' and not user.totp_enabled:
+        redirect_target = url_for('setup_totp')
+    else:
+        redirect_target = url_for('dashboard')
+    return jsonify({'status': 'completed', 'redirect': redirect_target,
+                    'is_admin': bool(user.is_admin)})
+
+
+# ==================== Enrollment API ====================
+
+@app.route('/api/enroll/script')
+def api_enroll_script():
+    token = (request.args.get('token') or '').strip()
+    host_id_raw = (request.args.get('host_id') or '').strip()
+    if not token:
+        return ('# enrollment token required\n', 403, {'Content-Type': 'text/plain'})
+    host = Host.query.filter_by(enrollment_token=token).first()
+    if not host:
+        return ('# invalid enrollment token\n', 403, {'Content-Type': 'text/plain'})
+    if host_id_raw:
+        try:
+            if int(host_id_raw) != host.id:
+                return ('# token/host_id mismatch\n', 403, {'Content-Type': 'text/plain'})
+        except ValueError:
+            return ('# invalid host_id\n', 400, {'Content-Type': 'text/plain'})
+    if host.enrolled_at is not None:
+        return ('# token already used\n', 409, {'Content-Type': 'text/plain'})
+    if host.enrollment_expires_at is None or host.enrollment_expires_at < datetime.utcnow():
+        return ('# token expired\n', 403, {'Content-Type': 'text/plain'})
+    server_url = request.url_root.rstrip('/')
+    script = render_template(
+        'enrollment_script.sh',
+        server_url=server_url, token=host.enrollment_token,
+        hostname=host.hostname, key_type=ALLOWED_HOST_KEY_TYPE,
+    )
+    return (script, 200, {'Content-Type': 'text/x-shellscript; charset=utf-8'})
+
+
+@app.route('/api/ca-pubkey')
+def api_ca_pubkey():
+    if not os.path.exists(cert_gen.ca_pubkey):
+        return ('CA public key not configured', 503, {'Content-Type': 'text/plain'})
+    with open(cert_gen.ca_pubkey) as f:
+        data = f.read()
+    return (data, 200, {'Content-Type': 'text/plain; charset=utf-8'})
+
+
+@app.route('/api/enroll/host', methods=['POST'])
+def api_enroll_host():
+    """Token-authenticated host self-enrollment. Body: {token, public_key}."""
+    payload = request.get_json(silent=True) or request.form
+    token = (payload.get('token') or '').strip()
+    public_key = (payload.get('public_key') or '').strip()
+    if not token or not public_key:
+        return jsonify({'ok': False, 'error': 'token and public_key required'}), 400
+    host = Host.query.filter_by(enrollment_token=token).first()
+    if not host:
+        return jsonify({'ok': False, 'error': 'invalid token'}), 403
+    if host.enrolled_at is not None:
+        return jsonify({'ok': False, 'error': 'token already used'}), 409
+    if host.enrollment_expires_at is None or host.enrollment_expires_at < datetime.utcnow():
+        return jsonify({'ok': False, 'error': 'token expired'}), 403
+    if not public_key.startswith(ALLOWED_HOST_KEY_TYPE + ' '):
+        return jsonify({'ok': False,
+                        'error': f'host key must be {ALLOWED_HOST_KEY_TYPE}'}), 400
+
+    host_ssh_key = _get_or_create_ssh_key(public_key, 'host')
+    db.session.flush()
+    host.host_key_id = host_ssh_key.id
+    host.enrolled_at = datetime.utcnow()
+    host.enrollment_token = None
+    host.enrollment_expires_at = None
+    db.session.commit()
+
+    # Auto-issue a host certificate if the CA is configured.
+    cert_data = None
+    try:
+        if os.path.exists(cert_gen.ca_key):
+            cert_data = _do_issue_host_cert(host, host.created_by_id)
+            db.session.commit()
+    except Exception:
+        pass  # enrollment still succeeds; admin can issue cert manually
+
+    return jsonify({'ok': True, 'hostname': host.hostname, 'cert_data': cert_data})
+
+
+# ==================== Internal cert helpers ====================
+
+def _do_issue_host_cert(host, requester_id, valid_days=365):
+    """Issue a host certificate. Caller is responsible for auth checks and commit."""
     with tempfile.NamedTemporaryFile(mode='w', delete=False, suffix='.pub') as f:
-        f.write(host.public_key)
+        f.write(host.host_key.public_key)
         tmp = f.name
     try:
         cert_data, serial = cert_gen.generate_host_certificate(tmp, host.hostname, valid_days)
     finally:
         os.unlink(tmp)
     cert = Certificate(
-        cert_type='host', host_id=host.id, public_key=host.public_key,
+        ssh_key_id=host.host_key_id,
         serial=serial,
         valid_from=datetime.utcnow(),
         valid_until=datetime.utcnow() + timedelta(days=valid_days),
-        created_by_id=requester_id, certificate_data=cert_data,
+        created_by_id=requester_id,
+        certificate_data=cert_data,
     )
     cert.issue_install_token()
     db.session.add(cert)
     return cert_data
 
 
-def _do_issue_user_cert(sshuser, requester_id, principals=None, valid_days=365):
-    """Issue a user certificate, persist it, and return certificate_data.
-
-    Caller is responsible for verifying authentication and authorization
-    before calling this function — it performs no auth checks of its own.
-    """
+def _do_issue_user_cert(credential, requester_id, principals=None, valid_days=365,
+                        critical_options=None):
+    """Issue a user certificate. Caller is responsible for auth checks and commit."""
     if not principals:
-        principals = [sshuser.username]
+        principals = [credential.unix_username]
     with tempfile.NamedTemporaryFile(mode='w', delete=False, suffix='.pub') as f:
-        f.write(sshuser.public_key)
+        f.write(credential.user_key.public_key)
         tmp = f.name
     try:
         cert_data, serial = cert_gen.generate_user_certificate(
-            tmp, sshuser.username, valid_days, principals)
+            tmp, credential.unix_username, valid_days, principals, critical_options)
     finally:
         os.unlink(tmp)
     cert = Certificate(
-        cert_type='user', user_id=sshuser.id, public_key=sshuser.public_key,
+        ssh_key_id=credential.user_key_id,
         serial=serial,
         valid_from=datetime.utcnow(),
         valid_until=datetime.utcnow() + timedelta(days=valid_days),
-        created_by_id=requester_id, certificate_data=cert_data,
+        created_by_id=requester_id,
+        certificate_data=cert_data,
     )
     cert.issue_install_token()
     db.session.add(cert)
@@ -1494,20 +1667,9 @@ def _do_issue_user_cert(sshuser, requester_id, principals=None, valid_days=365):
 def _ssh_add_machine(requester_user_id: int, data: dict) -> dict:
     """Process an add_machine request from the sshadmin_add script.
 
-    Security model
-    --------------
-    Authentication: the caller reaches this function only through _serve_exec,
-    which is invoked after paramiko successfully verifies the client's SSH
-    private key against User.public_key in the database — the same proof-of-
-    ownership as the web challenge-response flow, just using SSH's built-in
-    key-exchange rather than an explicit nonce signature.
-
-    Authorization:
-    - requester must be a fully-registered (completed) account.
-    - Existing enrolled hosts may only be re-enrolled by an owner or admin;
-      a new host is automatically created with the requester as owner.
-    - User certs: if the SSH user already exists, only the creator or an admin
-      may re-issue. New SSH users are auto-created with the requester as creator.
+    Called after the requester's SSH key has already been verified by paramiko.
+    Creates/updates SSHKey, Host, HostUsers (owner), and UserCredential rows,
+    then issues host + user certificates.
     """
     with app.app_context():
         requester = User.query.get(requester_user_id)
@@ -1526,23 +1688,18 @@ def _ssh_add_machine(requester_user_id: int, data: dict) -> dict:
         if not host_key.startswith(ALLOWED_HOST_KEY_TYPE + ' '):
             return {'ok': False, 'error': f'host key must be {ALLOWED_HOST_KEY_TYPE}'}
 
-        user_key_type = user_key.split()[0] if user_key.split() else ''
+        user_key_type = (user_key.split() or [''])[0]
         if user_key_type not in ALLOWED_USER_KEY_TYPES:
             return {'ok': False,
                     'error': f'user key type {user_key_type!r} not allowed; '
                              f'accepted: {", ".join(ALLOWED_USER_KEY_TYPES)}'}
 
-        norm_host_key = ' '.join(host_key.split()[:2])
-        norm_user_key = ' '.join(user_key.split()[:2])
+        # ── Host SSH key ──────────────────────────────────────────────────────
+        host_ssh_key = _get_or_create_ssh_key(host_key, 'host')
+        db.session.flush()
 
-        # ── Host ──────────────────────────────────────────────────────────────
-        # Identify by public key so aliases (IPs, multiple DNS names) all map
-        # to the same record, regardless of the hostname reported by the remote.
-        host = next(
-            (h for h in Host.query.filter(Host.public_key.isnot(None)).all()
-             if _pubkey_match(h.public_key, host_key)),
-            None,
-        )
+        # ── Host ─────────────────────────────────────────────────────────────
+        host = Host.query.filter_by(host_key_id=host_ssh_key.id).first()
         if host is None:
             host = Host.query.filter_by(hostname=hostname).first()
 
@@ -1551,53 +1708,68 @@ def _ssh_add_machine(requester_user_id: int, data: dict) -> dict:
                 hostname=hostname,
                 description=f'Added via sshadmin_add by {requester.username}',
                 created_by_id=requester.id,
-                public_key=norm_host_key,
+                host_key_id=host_ssh_key.id,
                 enrolled_at=datetime.utcnow(),
             )
-            host.owners.append(requester)
             db.session.add(host)
         else:
-            # Host already exists — requester must be an owner or admin
-            if not requester.is_admin and requester not in host.owners:
+            # Existing host: requester must already have owner access or be admin
+            existing_hu = HostUsers.query.filter_by(
+                host_id=host.id, user_id=requester.id).first()
+            if not requester.is_admin and (
+                existing_hu is None or existing_hu.role != 'owner'
+            ):
                 return {
                     'ok': False,
-                    'error': (f'host {host.hostname!r} is already enrolled by another user; '
-                              'ask them to share access or contact an admin'),
+                    'error': (f'host {host.hostname!r} is already managed by another user; '
+                              'ask them to share owner access or contact an admin'),
                 }
-            host.public_key = norm_host_key
+            host.host_key_id = host_ssh_key.id
             host.enrolled_at = datetime.utcnow()
             host.enrollment_token = None
             host.enrollment_expires_at = None
-
         db.session.flush()
 
-        # ── SSH user ──────────────────────────────────────────────────────────
-        sshuser = next(
-            (su for su in SSHUser.query.filter_by(username=username).all()
-             if _pubkey_match(su.public_key, user_key)),
-            None,
-        )
-        if sshuser is None:
-            sshuser = SSHUser(
-                username=username,
-                public_key=norm_user_key,
-                description=f'Added via sshadmin_add from {hostname}',
-                created_by_id=requester.id,
-            )
-            db.session.add(sshuser)
-            db.session.flush()
-        else:
-            # SSH user already exists — only the creator or an admin may re-issue
-            if not requester.is_admin and sshuser.created_by_id != requester.id:
-                return {
-                    'ok': False,
-                    'error': (f'SSH user {username!r} was created by another user; '
-                              'ask them to issue the certificate or contact an admin'),
-                }
+        # ── HostUsers (owner — sshadmin_add proves sudo/root access) ─────────
+        hu = _get_or_create_host_user(host.id, requester.id, 'owner')
+        db.session.flush()
 
+        # ── User SSH key ──────────────────────────────────────────────────────
+        norm_user_key = _normalize_pubkey(user_key)
+        user_ssh_key = _get_or_create_ssh_key(norm_user_key, 'user')
+        db.session.flush()
+
+        # Duplicate-key guard across users
+        existing_cred = UserCredential.query.filter_by(
+            user_key_id=user_ssh_key.id).first()
+        if existing_cred and existing_cred.user_id != requester.id:
+            return {'ok': False,
+                    'error': 'this SSH user key is already registered to another account'}
+        if existing_cred and existing_cred.user_id == requester.id:
+            other_host = existing_cred.host
+            if other_host and other_host.id != host.id:
+                print(f'[sshadmin] WARNING: user key {user_ssh_key.key_hash} '
+                      f'already registered on {other_host.hostname}, '
+                      f'now also on {hostname} — private key may have been copied',
+                      flush=True)
+
+        # ── UserCredential ────────────────────────────────────────────────────
+        cred = UserCredential.query.filter_by(
+            user_id=requester.id, user_key_id=user_ssh_key.id).first()
+        if cred is None:
+            cred = UserCredential(
+                user_id=requester.id,
+                user_key_id=user_ssh_key.id,
+                host_user_id=hu.id,
+                unix_username=username,
+            )
+            db.session.add(cred)
+        db.session.flush()
+
+        # ── Issue certs ───────────────────────────────────────────────────────
         try:
             host_cert = _do_issue_host_cert(host, requester.id, valid_days)
-            user_cert = _do_issue_user_cert(sshuser, requester.id, [username], valid_days)
+            user_cert = _do_issue_user_cert(cred, requester.id, [username], valid_days)
             db.session.commit()
         except Exception as exc:
             db.session.rollback()
@@ -1616,261 +1788,35 @@ def _ssh_add_machine(requester_user_id: int, data: dict) -> dict:
         }
 
 
-def _pubkey_match(a, b):
-    """Compare just the algorithm + base64 parts (ignore comments) of two SSH pubkeys."""
-    pa = (a or '').split()
-    pb = (b or '').split()
-    return len(pa) >= 2 and len(pb) >= 2 and pa[0] == pb[0] and pa[1] == pb[1]
+def _ssh_get_cert(subject: str):
+    """Latest valid cert for subject: hostname checked first, then unix_username."""
+    with app.app_context():
+        host = Host.query.filter_by(hostname=subject).first()
+        if host and host.host_key_id:
+            cert = _latest_valid_cert_for_key(host.host_key_id)
+            if cert and cert.certificate_data:
+                return cert.certificate_data.strip() + '\n'
+        cred = UserCredential.query.filter_by(unix_username=subject).first()
+        if cred:
+            cert = _latest_valid_cert_for_key(cred.user_key_id)
+            if cert and cert.certificate_data:
+                return cert.certificate_data.strip() + '\n'
+    return None
 
 
-def _finalize_consumed_challenge(challenge):
-    """Apply post-consume side effects of a registration challenge.
-
-    Caller must have already set `challenge.consumed_at` and ensured the
-    consumer was authorized. This function is a no-op for login challenges.
-    Caller is responsible for db.session.commit().
-    """
-    if challenge.purpose != 'register':
-        return
-    if challenge.user.completed_at is not None:
-        return
-
-    # Promote the first completed user to admin.
-    existing_admin = (
-        User.query
-        .filter(User.completed_at.isnot(None), User.is_admin == True)  # noqa: E712
-        .first()
-    )
-    if existing_admin is None:
-        challenge.user.is_admin = True
-    challenge.user.completed_at = datetime.utcnow()
-
-    # Auto-create an SSHUser identity from the registration data so the
-    # new login user can immediately be issued certificates without a
-    # separate /users/add step.
-    already = SSHUser.query.filter_by(
-        username=challenge.user.username,
-        public_key=challenge.user.public_key,
-    ).first()
-    if already is None:
-        db.session.add(SSHUser(
-            username=challenge.user.username,
-            public_key=challenge.user.public_key,
-            description='Auto-created at registration',
-            created_by_id=challenge.user.id,
-        ))
-
-
-def _try_enroll_host_during_register(user, hostname, host_pubkey):
-    """Best-effort host enrollment as part of registration.
-
-    - Same hostname + same pubkey → add `user` as co-owner (implicit share).
-    - Same hostname + different pubkey → refuse (409-equivalent: enrolled=False).
-    - Pending host → promote to enrolled and add `user` as owner.
-    - New hostname → create + add `user` as owner.
-    """
-    if not host_pubkey.startswith(ALLOWED_HOST_KEY_TYPE + ' '):
-        return {'enrolled': False, 'reason': f'host key must be {ALLOWED_HOST_KEY_TYPE}'}
-
-    existing = Host.query.filter_by(hostname=hostname).first()
-    if existing is not None:
-        if existing.is_enrolled:
-            if _pubkey_match(existing.public_key, host_pubkey):
-                if user not in existing.owners:
-                    existing.owners.append(user)
-                    return {'enrolled': True, 'hostname': hostname, 'shared': True}
-                return {'enrolled': True, 'hostname': hostname, 'already_owner': True}
-            return {
-                'enrolled': False,
-                'reason': 'hostname already enrolled with a different public key',
-            }
-        existing.public_key = host_pubkey
-        existing.enrolled_at = datetime.utcnow()
-        existing.enrollment_token = None
-        existing.enrollment_expires_at = None
-        if user not in existing.owners:
-            existing.owners.append(user)
-        return {'enrolled': True, 'hostname': hostname, 'reused_pending': True}
-
-    host = Host(
-        hostname=hostname,
-        public_key=host_pubkey,
-        enrolled_at=datetime.utcnow(),
-        created_by_id=user.id,
-    )
-    host.owners.append(user)
-    db.session.add(host)
-    return {'enrolled': True, 'hostname': hostname, 'reused_pending': False}
-
-
-@app.route('/api/totp_response', methods=['POST'])
-def api_totp_response():
-    """Alternate path for login challenges: validate a TOTP code instead of a signature."""
-    payload = request.get_json(silent=True) or request.form
-    token = (payload.get('token') or '').strip()
-    code = (payload.get('code') or '').strip()
-
-    if not token or not code:
-        return jsonify({'ok': False, 'error': 'token and code required'}), 400
-
-    challenge = Challenge.query.filter_by(token=token).first()
-    if not challenge:
-        return jsonify({'ok': False, 'error': 'invalid token'}), 404
-    if challenge.consumed_at is not None:
-        return jsonify({'ok': False, 'error': 'challenge already used'}), 409
-    if challenge.expires_at < datetime.utcnow():
-        return jsonify({'ok': False, 'error': 'challenge expired'}), 410
-    if challenge.purpose != 'login':
-        # TOTP cannot be used to register — TOTP isn't enrolled until *after* registration.
-        return jsonify({'ok': False, 'error': 'TOTP can only be used for login'}), 403
-
-    user = challenge.user
-    if not user.totp_enabled or not user.totp_secret:
-        return jsonify({'ok': False, 'error': 'TOTP is not enabled for this user'}), 403
-
-    totp = pyotp.TOTP(user.totp_secret)
-    if not totp.verify(code, valid_window=1):
-        return jsonify({'ok': False, 'error': 'invalid code'}), 403
-
-    challenge.consumed_at = datetime.utcnow()
-    db.session.commit()
-    return jsonify({'ok': True, 'username': user.username})
-
-
-@app.route('/api/auth_status/<token>')
-def api_auth_status(token):
-    """Polled by the await page in the browser. Logs the user in once verified."""
-    challenge = Challenge.query.filter_by(token=token).first()
-    if not challenge:
-        return jsonify({'status': 'unknown'}), 404
-
-    if challenge.expires_at < datetime.utcnow() and challenge.consumed_at is None:
-        return jsonify({'status': 'expired'})
-
-    if challenge.consumed_at is None:
-        return jsonify({'status': 'pending'})
-
-    # Consumed: only the originating browser session may convert it to a login.
-    if session.get('pending_challenge_token') != token:
-        return jsonify({'status': 'completed_other_session'})
-
-    user = challenge.user
-    if user.completed_at is None:
-        return jsonify({'status': 'pending'})
-
-    login_user(user)
-    session.pop('pending_challenge_token', None)
-
-    # Brand-new registration → offer TOTP setup. Existing users go to dashboard.
-    if challenge.purpose == 'register' and not user.totp_enabled:
-        redirect_target = url_for('setup_totp')
-    else:
-        redirect_target = url_for('dashboard')
-
-    return jsonify({
-        'status': 'completed',
-        'redirect': redirect_target,
-        'is_admin': bool(user.is_admin),
-    })
-
-
-@app.route('/api/enroll/script')
-def api_enroll_script():
-    """Public token-authenticated endpoint that returns the enrollment script.
-
-    Designed so the host operator can run the bundled one-liner:
-        curl -fsSL "<url>/api/enroll/script?token=...&host_id=..." | sudo bash
-    """
-    token = (request.args.get('token') or '').strip()
-    host_id_raw = (request.args.get('host_id') or '').strip()
-
-    if not token:
-        return ('# enrollment token required\n', 403, {'Content-Type': 'text/plain'})
-
-    host = Host.query.filter_by(enrollment_token=token).first()
-    if not host:
-        return ('# invalid enrollment token\n', 403, {'Content-Type': 'text/plain'})
-
-    if host_id_raw:
-        try:
-            if int(host_id_raw) != host.id:
-                return ('# token/host_id mismatch\n', 403, {'Content-Type': 'text/plain'})
-        except ValueError:
-            return ('# invalid host_id\n', 400, {'Content-Type': 'text/plain'})
-
-    if host.enrolled_at is not None:
-        return ('# token already used\n', 409, {'Content-Type': 'text/plain'})
-
-    if host.enrollment_expires_at is None or host.enrollment_expires_at < datetime.utcnow():
-        return ('# token expired\n', 403, {'Content-Type': 'text/plain'})
-
-    server_url = request.url_root.rstrip('/')
-    script = render_template(
-        'enrollment_script.sh',
-        server_url=server_url,
-        token=host.enrollment_token,
-        hostname=host.hostname,
-        key_type=ALLOWED_HOST_KEY_TYPE,
-    )
-    return (script, 200, {'Content-Type': 'text/x-shellscript; charset=utf-8'})
-
-
-@app.route('/api/ca-pubkey')
-def api_ca_pubkey():
-    """Public CA public key for client trust installation."""
-    if not os.path.exists(cert_gen.ca_pubkey):
-        return ('CA public key not configured', 503, {'Content-Type': 'text/plain'})
-    with open(cert_gen.ca_pubkey, 'r') as f:
-        data = f.read()
-    return (data, 200, {'Content-Type': 'text/plain; charset=utf-8'})
-
-
-@app.route('/api/enroll/host', methods=['POST'])
-def api_enroll_host():
-    """Token-authenticated host self-enrollment. Body: {token, public_key}."""
-    payload = request.get_json(silent=True) or request.form
-    token = (payload.get('token') or '').strip()
-    public_key = (payload.get('public_key') or '').strip()
-
-    if not token or not public_key:
-        return jsonify({'ok': False, 'error': 'token and public_key required'}), 400
-
-    host = Host.query.filter_by(enrollment_token=token).first()
-    if not host:
-        return jsonify({'ok': False, 'error': 'invalid token'}), 403
-
-    if host.enrolled_at is not None:
-        return jsonify({'ok': False, 'error': 'token already used'}), 409
-
-    if host.enrollment_expires_at is None or host.enrollment_expires_at < datetime.utcnow():
-        return jsonify({'ok': False, 'error': 'token expired'}), 403
-
-    if not public_key.startswith(ALLOWED_HOST_KEY_TYPE + ' '):
-        return jsonify({
-            'ok': False,
-            'error': f'host key must be {ALLOWED_HOST_KEY_TYPE}',
-        }), 400
-
-    host.public_key = public_key
-    host.enrolled_at = datetime.utcnow()
-    host.enrollment_token = None
-    host.enrollment_expires_at = None
-    db.session.commit()
-
-    return jsonify({'ok': True, 'hostname': host.hostname})
-
+# ==================== Error handlers ====================
 
 @app.errorhandler(404)
 def not_found(error):
-    """Handle 404 errors"""
     return render_template('404.html'), 404
 
 
 @app.errorhandler(500)
 def server_error(error):
-    """Handle 500 errors"""
     return render_template('500.html'), 500
 
+
+# ==================== Startup ====================
 
 def _log_startup_status():
     if cert_gen.check_ca_keys():
@@ -1878,14 +1824,12 @@ def _log_startup_status():
     else:
         print(
             f'[sshadmin] WARNING: CA key not found at {cert_gen.ca_key}. '
-            f'Log in as the first registered user (auto-admin) and visit /setup/ca '
-            f'to generate one. Override path via SSH_CA_KEY.',
+            f'Log in as the first registered user (auto-admin) and visit /setup/ca.',
             flush=True,
         )
 
 
 def _start_ssh_auth_server_if_enabled():
-    """Start the SSH-based alternative auth server if not disabled."""
     if os.environ.get('SSHADMIN_DISABLE_SSH_AUTH', '0') == '1':
         return None
     port = int(os.environ.get('SSHADMIN_SSH_PORT', '2222'))
@@ -1895,10 +1839,15 @@ def _start_ssh_auth_server_if_enabled():
         from ssh_auth_server import start_ssh_auth_server
         sock = start_ssh_auth_server(
             app=app, db=db,
-            models={'User': User, 'Challenge': Challenge,
-                    'finalize_challenge': _finalize_consumed_challenge,
-                    'get_cert': _ssh_get_cert,
-                    'add_machine': _ssh_add_machine},
+            models={
+                'User': User,
+                'Challenge': Challenge,
+                'UserCredential': UserCredential,
+                'SSHKey': SSHKey,
+                'finalize_challenge': _finalize_consumed_challenge,
+                'get_cert': _ssh_get_cert,
+                'add_machine': _ssh_add_machine,
+            },
             host=bind, port=port,
             ca_key_path=cert_gen.ca_key if cert_gen.check_ca_keys() else None,
             host_principals=['sshadmin', public_host or '*'],
@@ -1906,9 +1855,10 @@ def _start_ssh_auth_server_if_enabled():
         actual_port = sock.getsockname()[1]
         app.config['SSHADMIN_SSH_PORT'] = actual_port
         cert_note = ' (host key signed by CA)' if cert_gen.check_ca_keys() else ''
-        print(f'[sshadmin] SSH auth server listening on {bind}:{actual_port}{cert_note}', flush=True)
+        print(f'[sshadmin] SSH auth server listening on {bind}:{actual_port}{cert_note}',
+              flush=True)
         return sock
-    except Exception as exc:  # pragma: no cover - best-effort startup notice
+    except Exception as exc:
         print(f'[sshadmin] WARNING: SSH auth server not started: {exc}', flush=True)
         return None
 

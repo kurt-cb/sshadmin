@@ -35,8 +35,8 @@
     </div>
     <div class="col-md-4">
         <div class="stat-card" style="background: linear-gradient(135deg, #27ae60, #229954);">
-            <h3>{{ users_count }}</h3>
-            <p>SSH Users</p>
+            <h3>{{ credentials_count }}</h3>
+            <p>SSH User Keys</p>
         </div>
     </div>
     <div class="col-md-4">
@@ -77,10 +77,12 @@
                                     {% endif %}
                                 </td>
                                 <td>
-                                    {% if cert.user %}
-                                        {{ cert.user.username }}
-                                    {% elif cert.host %}
+                                    {% if cert.cert_type == 'user' and cert.credential %}
+                                        {{ cert.credential.unix_username }}@{{ cert.credential.host.hostname }}
+                                    {% elif cert.cert_type == 'host' and cert.host %}
                                         {{ cert.host.hostname }}
+                                    {% else %}
+                                        {{ cert.serial[:12] }}
                                     {% endif %}
                                 </td>
                                 <td><code>{{ cert.serial[:8] }}...</code></td>
@@ -107,8 +109,8 @@
                 <a href="/hosts/add" class="btn btn-outline-primary w-100 mb-2">
                     <i class="bi bi-plus-circle"></i> Add Host
                 </a>
-                <a href="/users/add" class="btn btn-outline-success w-100 mb-2">
-                    <i class="bi bi-plus-circle"></i> Add SSH User
+                <a href="{{ url_for('add_credential') }}" class="btn btn-outline-success w-100 mb-2">
+                    <i class="bi bi-plus-circle"></i> Add SSH User Key
                 </a>
                 <a href="/certificates/issue/user" class="btn btn-outline-info w-100 mb-2">
                     <i class="bi bi-file-certificate"></i> Issue User Cert

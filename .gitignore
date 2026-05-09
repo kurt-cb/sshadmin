@@ -56,3 +56,5 @@ data/
 # Logs
 *.log
 logs/
+
+ssh_host_key*

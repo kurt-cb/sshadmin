@@ -37,8 +37,19 @@
                 </thead>
                 <tbody>
                     {% for cert in certificates %}
-                    {% set subject = cert.user.username if cert.user else (cert.host.hostname if cert.host else cert.serial) %}
-                    {% set api_url = url_for('api_cert_user', username=subject) if cert.cert_type == 'user' else url_for('api_cert_host', hostname=subject) %}
+                    {% if cert.cert_type == 'user' and cert.credential %}
+                      {% set subject = cert.credential.unix_username %}
+                      {% set display_subject = cert.credential.unix_username ~ '@' ~ cert.credential.host.hostname %}
+                      {% set api_url = url_for('api_cert_user', unix_username=cert.credential.unix_username) %}
+                    {% elif cert.cert_type == 'host' and cert.host %}
+                      {% set subject = cert.host.hostname %}
+                      {% set display_subject = cert.host.hostname %}
+                      {% set api_url = url_for('api_cert_host', hostname=cert.host.hostname) %}
+                    {% else %}
+                      {% set subject = cert.serial %}
+                      {% set display_subject = cert.serial %}
+                      {% set api_url = '#' %}
+                    {% endif %}
                     <tr>
                         <td class="ps-2">
                             <button class="btn btn-sm btn-outline-secondary border-0 p-0 px-1"
@@ -57,7 +68,7 @@
                                 <span class="badge bg-warning"><i class="bi bi-hdd-rack"></i> Host</span>
                             {% endif %}
                         </td>
-                        <td><strong>{{ subject }}</strong></td>
+                        <td><strong>{{ display_subject }}</strong></td>
                         <td>
                             <code title="{{ cert.serial }}">{{ cert.serial[:16] }}...</code>
                         </td>
@@ -76,7 +87,7 @@
                                 <a href="{{ url_for('cert_install', cert_id=cert.id) }}" class="btn btn-primary" title="Install instructions">
                                     <i class="bi bi-download"></i> Install
                                 </a>
-                                <a href="{{ api_url }}" class="btn btn-outline-secondary" title="Download cert file" download="sshadmin-{{ cert.cert_type }}-{{ subject }}-cert.pub">
+                                <a href="{{ api_url }}" class="btn btn-outline-secondary" title="Download cert file" download="sshadmin-{{ cert.cert_type }}-{{ display_subject }}-cert.pub">
                                     <i class="bi bi-file-earmark-arrow-down"></i>
                                 </a>
                             </div>
@@ -95,7 +106,7 @@
                                         </button>
                                         <a href="{{ api_url }}" class="btn btn-xs btn-outline-primary py-0 px-1"
                                            style="font-size:.75rem"
-                                           download="sshadmin-{{ cert.cert_type }}-{{ subject }}-cert.pub">
+                                           download="sshadmin-{{ cert.cert_type }}-{{ display_subject }}-cert.pub">
                                             <i class="bi bi-download"></i> Download
                                         </a>
                                     </div>

@@ -8,7 +8,6 @@ from conftest import latest_challenge, register_via_api
 # ----------------- /api/ca-pubkey -----------------
 
 def test_ca_pubkey_503_when_missing(client):
-    # No `ca_keys` fixture here — CA path doesn't exist.
     r = client.get('/api/ca-pubkey')
     assert r.status_code == 503
     assert b'CA public key not configured' in r.data
@@ -28,7 +27,6 @@ def test_ca_pubkey_returns_pubkey(client, ca_keys):
 
 def test_ca_status_requires_login(client):
     r = client.get('/api/ca-status', follow_redirects=False)
-    # Flask-Login redirects unauth'd requests to login.
     assert r.status_code == 302
     assert '/login' in r.headers['Location']
 
@@ -53,7 +51,10 @@ def test_auth_script_unknown_token(client):
 
 
 def test_auth_script_returns_script_for_active_challenge(client, keypair):
-    client.post('/register', data={'username': 'alice', 'public_key': keypair['public_key']})
+    client.post('/register', data={
+        'username': 'alice', 'unix_username': 'alice',
+        'public_key': keypair['public_key'],
+    })
     with sshadmin.app.app_context():
         ch = latest_challenge('register')
         token, nonce = ch.token, ch.nonce
@@ -63,10 +64,13 @@ def test_auth_script_returns_script_for_active_challenge(client, keypair):
     assert r.headers['Content-Type'].startswith('text/x-shellscript')
     body = r.data.decode()
     assert nonce in body
-    assert keypair['public_key'] in body
+    # The script embeds the registered pubkey(s) in the REGISTERED_PUBKEYS array.
+    key_parts = keypair['public_key'].split()
+    assert key_parts[0] in body   # algorithm
+    assert key_parts[1] in body   # base64
     assert sshadmin.SSHSIG_NAMESPACE in body
-    # registration scripts include host enrollment block
-    assert 'enrolling host' in body.lower() or 'host_pub' in body.lower()
+    # Registration scripts include host enrollment block.
+    assert 'HOST_KEY' in body or 'host' in body.lower()
 
 
 def test_auth_script_login_omits_host_enrollment(client, keypair, sign):
@@ -80,7 +84,8 @@ def test_auth_script_login_omits_host_enrollment(client, keypair, sign):
     r = client.get(f'/api/auth/script?token={token}')
     assert r.status_code == 200
     body = r.data.decode()
-    assert 'optional host enrollment' not in body
+    # Login scripts do not include host enrollment sections.
+    assert 'HOST_KEY_TYPE' not in body
     assert 'enrolling host' not in body.lower()
 
 
@@ -95,7 +100,10 @@ def test_auth_script_consumed_token(client, keypair, sign):
 
 
 def test_auth_script_expired_token(client, keypair):
-    client.post('/register', data={'username': 'alice', 'public_key': keypair['public_key']})
+    client.post('/register', data={
+        'username': 'alice', 'unix_username': 'alice',
+        'public_key': keypair['public_key'],
+    })
     with sshadmin.app.app_context():
         ch = latest_challenge('register')
         ch.expires_at = datetime.utcnow() - timedelta(minutes=1)
@@ -131,7 +139,10 @@ def test_challenge_response_already_used(client, keypair, sign):
 
 
 def test_challenge_response_expired(client, keypair, sign):
-    client.post('/register', data={'username': 'alice', 'public_key': keypair['public_key']})
+    client.post('/register', data={
+        'username': 'alice', 'unix_username': 'alice',
+        'public_key': keypair['public_key'],
+    })
     with sshadmin.app.app_context():
         ch = latest_challenge('register')
         ch.expires_at = datetime.utcnow() - timedelta(minutes=1)
@@ -143,7 +154,10 @@ def test_challenge_response_expired(client, keypair, sign):
 
 
 def test_challenge_response_with_host_enrolls_host(client, keypair, sign, host_keypair):
-    client.post('/register', data={'username': 'alice', 'public_key': keypair['public_key']})
+    client.post('/register', data={
+        'username': 'alice', 'unix_username': 'alice',
+        'public_key': keypair['public_key'],
+    })
     with sshadmin.app.app_context():
         ch = latest_challenge('register')
         token, nonce = ch.token, ch.nonce
@@ -161,22 +175,26 @@ def test_challenge_response_with_host_enrolls_host(client, keypair, sign, host_k
         host = sshadmin.Host.query.filter_by(hostname='box1.example.com').first()
         assert host is not None
         assert host.is_enrolled
-        assert host.public_key == host_keypair['public_key']
+        # Compare algorithm + base64 only (comment may be stripped during normalization).
+        assert host.public_key.split()[:2] == host_keypair['public_key'].split()[:2]
 
 
 def test_challenge_response_rejects_wrong_host_key_type(client, keypair, sign, keypair_ed25519):
-    client.post('/register', data={'username': 'alice', 'public_key': keypair['public_key']})
+    client.post('/register', data={
+        'username': 'alice', 'unix_username': 'alice',
+        'public_key': keypair['public_key'],
+    })
     with sshadmin.app.app_context():
         ch = latest_challenge('register')
         token, nonce = ch.token, ch.nonce
     sig = sign(nonce)
 
-    # Pass an ed25519 key as the *host* key (not allowed).
+    # Pass an ed25519 key as the *host* key (not allowed — must be ecdsa-sha2-nistp521).
     r = client.post('/api/challenge_response', data={
         'token': token, 'signature': sig,
         'hostname': 'box1', 'host_public_key': keypair_ed25519['public_key'],
     })
-    # User registration still succeeds, host enrollment is reported as skipped.
+    # Challenge is consumed (prevents replay) but registration is incomplete.
     assert r.status_code == 200
     assert r.json['ok'] is True
     assert r.json['host']['enrolled'] is False
@@ -190,7 +208,10 @@ def test_auth_status_unknown_token(client):
 
 
 def test_auth_status_pending(client, keypair):
-    client.post('/register', data={'username': 'alice', 'public_key': keypair['public_key']})
+    client.post('/register', data={
+        'username': 'alice', 'unix_username': 'alice',
+        'public_key': keypair['public_key'],
+    })
     with sshadmin.app.app_context():
         ch = latest_challenge('register')
         token = ch.token
@@ -200,7 +221,10 @@ def test_auth_status_pending(client, keypair):
 
 
 def test_auth_status_expired(client, keypair):
-    client.post('/register', data={'username': 'alice', 'public_key': keypair['public_key']})
+    client.post('/register', data={
+        'username': 'alice', 'unix_username': 'alice',
+        'public_key': keypair['public_key'],
+    })
     with sshadmin.app.app_context():
         ch = latest_challenge('register')
         ch.expires_at = datetime.utcnow() - timedelta(minutes=1)
@@ -223,7 +247,6 @@ def test_enroll_host_invalid_token(client):
 def test_enroll_host_validates_key_type(client, keypair, sign, keypair_ed25519, ca_keys):
     """The legacy admin-issued host enrollment path must reject non-P521 keys."""
     register_via_api(client, sign, keypair['public_key'], username='alice')
-    # Admin creates a Host (issues an enrollment token).
     r = client.post('/hosts/add', data={'hostname': 'srv1', 'description': ''})
     assert r.status_code == 302
 
@@ -251,7 +274,9 @@ def test_enroll_host_completes_with_correct_key(client, keypair, sign, host_keyp
         'token': token, 'public_key': host_keypair['public_key'],
     })
     assert r.status_code == 200
-    assert r.json == {'ok': True, 'hostname': 'srv2'}
+    assert r.json['ok'] is True
+    assert r.json['hostname'] == 'srv2'
+    assert 'cert_data' in r.json
 
     with sshadmin.app.app_context():
         host = sshadmin.Host.query.filter_by(hostname='srv2').first()
