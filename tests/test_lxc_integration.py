@@ -1090,7 +1090,7 @@ def lxc_enroll_env(lxc_env, user_keypairs):
                   'pkill sshd || true', check=False)
         time.sleep(1)
         _lxc_exec(CENROLL_ALPINE, '/usr/sbin/sshd', check=False)
-        _wait_for_ssh_port(CENROLL_ALPINE, port=22, max_wait=15)
+        _wait_for_ssh_port(CENROLL_ALPINE, port=22, max_wait=30)
 
         # CENROLL_UBUNTU and CENROLL_ALPINE need the CA in their global
         # known_hosts so cert-verified outbound SSH from C1 to them works
