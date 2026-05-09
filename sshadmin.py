@@ -84,6 +84,8 @@ class Host(db.Model):
     creator = db.relationship('User', backref='hosts', foreign_keys=[created_by_id])
     host_users = db.relationship('HostUsers', back_populates='host',
                                  cascade='all, delete-orphan')
+    aliases = db.relationship('HostAlias', back_populates='host',
+                              cascade='all, delete-orphan', order_by='HostAlias.created_at')
 
     @property
     def is_enrolled(self):
@@ -108,10 +110,26 @@ class Host(db.Model):
         self.host_key_id = None
 
     @property
+    def all_principals(self) -> list:
+        """Hostname plus all registered aliases — used for strict-mode host certs."""
+        return [self.hostname] + [a.alias for a in self.aliases]
+
+    @property
     def active_cert(self):
         if self.host_key_id is None:
             return None
         return _latest_valid_cert_for_key(self.host_key_id)
+
+
+class HostAlias(db.Model):
+    """Additional hostnames/IPs for a Host, included in host cert principals (strict mode)."""
+    __tablename__ = 'host_alias'
+    id = db.Column(db.Integer, primary_key=True)
+    host_id = db.Column(db.Integer, db.ForeignKey('host.id', ondelete='CASCADE'), nullable=False)
+    alias = db.Column(db.String(255), nullable=False)
+    created_at = db.Column(db.DateTime, default=datetime.utcnow)
+    __table_args__ = (db.UniqueConstraint('host_id', 'alias', name='_host_alias_uc'),)
+    host = db.relationship('Host', back_populates='aliases')
 
 
 class HostUsers(db.Model):
@@ -284,6 +302,30 @@ def get_allowed_user_key_types() -> tuple:
     except Exception:
         pass
     return _DEFAULT_USER_KEY_TYPES
+
+
+def get_strict_host_principals() -> bool:
+    """Return True when host certs must list all registered aliases as principals.
+
+    When False (default), host certs are issued without a -n flag, making them
+    valid for any hostname (wildcard). The CA key remains the security boundary.
+    """
+    try:
+        cfg = db.session.get(SiteConfig, 'strict_host_principals')
+        return cfg is not None and cfg.value == '1'
+    except Exception:
+        return False
+
+
+def _get_or_create_host_alias(host_id: int, alias: str) -> 'HostAlias':
+    """Add alias to host if not already present; returns the HostAlias row."""
+    alias = alias.strip()
+    existing = HostAlias.query.filter_by(host_id=host_id, alias=alias).first()
+    if existing:
+        return existing
+    ha = HostAlias(host_id=host_id, alias=alias)
+    db.session.add(ha)
+    return ha
 
 
 def _pubkey_hash(pubkey: str) -> str:
@@ -484,11 +526,12 @@ class SSHCertificateGenerator:
         cmd = [
             'ssh-keygen', '-s', self.ca_key, '-h',
             '-I', f'host-{serial}',
-            '-n', ','.join(hostnames),
             '-V', f'always:+{valid_days}d',
             '-z', str(serial),
-            public_key_path,
         ]
+        if hostnames:
+            cmd += ['-n', ','.join(hostnames)]
+        cmd.append(public_key_path)
         try:
             subprocess.run(cmd, capture_output=True, text=True, check=True)
             base = public_key_path[:-4] if public_key_path.endswith('.pub') else public_key_path
@@ -517,7 +560,7 @@ _CA_SETUP_ALLOWED_ENDPOINTS = {
     'api_enroll_script', 'api_enroll_ps1_script', 'api_enroll_host',
     'api_cert_install_data', 'api_cert_install_script',
     'api_cert_user', 'api_cert_host',
-    'download_sshadmin_add',
+    'download_sshadmin_add', 'download_sshadmin_ps1',
 }
 
 
@@ -1435,13 +1478,26 @@ def api_cert_host(hostname):
 
 
 @app.route('/download/sshadmin_add')
+@app.route('/download/sshadmin')
 def download_sshadmin_add():
     ssh_host = request.host.split(':')[0]
     ssh_port = app.config.get('SSHADMIN_SSH_PORT',
                               int(os.environ.get('SSHADMIN_SSH_PORT', 2222)))
-    script = render_template('sshadmin_add.sh', ssh_host=ssh_host, ssh_port=ssh_port)
+    script = render_template('sshadmin.sh', ssh_host=ssh_host, ssh_port=ssh_port)
     return Response(script, mimetype='text/x-shellscript; charset=utf-8',
-                    headers={'Content-Disposition': 'attachment; filename=sshadmin_add'})
+                    headers={'Content-Disposition': 'attachment; filename=sshadmin'})
+
+
+@app.route('/download/sshadmin.ps1')
+def download_sshadmin_ps1():
+    server_url = request.host_url.rstrip('/')
+    ssh_host = request.host.split(':')[0]
+    ssh_port = app.config.get('SSHADMIN_SSH_PORT',
+                              int(os.environ.get('SSHADMIN_SSH_PORT', 2222)))
+    script = render_template('sshadmin.ps1', server_url=server_url,
+                             ssh_host=ssh_host, ssh_port=ssh_port)
+    return Response(script, mimetype='text/plain; charset=utf-8',
+                    headers={'Content-Disposition': 'attachment; filename=sshadmin.ps1'})
 
 
 # ==================== Auth (challenge/response) API ====================
@@ -1758,6 +1814,42 @@ def api_ca_pubkey():
     return (data, 200, {'Content-Type': 'text/plain; charset=utf-8'})
 
 
+@app.route('/api/hosts/<int:host_id>/aliases', methods=['GET'])
+@login_required
+def api_host_aliases(host_id):
+    host = Host.query.get_or_404(host_id)
+    if not _can_view_host(host):
+        return jsonify({'error': 'forbidden'}), 403
+    return jsonify({'aliases': [a.alias for a in host.aliases]})
+
+
+@app.route('/api/hosts/<int:host_id>/aliases', methods=['POST'])
+@login_required
+def api_add_host_alias(host_id):
+    host = Host.query.get_or_404(host_id)
+    if not _can_admin_host(host):
+        return jsonify({'error': 'forbidden'}), 403
+    alias = (request.form.get('alias') or (request.get_json(silent=True) or {}).get('alias') or '').strip()
+    if not alias:
+        return jsonify({'error': 'alias is required'}), 400
+    _get_or_create_host_alias(host.id, alias)
+    db.session.commit()
+    return jsonify({'aliases': [a.alias for a in host.aliases]})
+
+
+@app.route('/api/hosts/<int:host_id>/aliases/<path:alias>', methods=['DELETE'])
+@login_required
+def api_delete_host_alias(host_id, alias):
+    host = Host.query.get_or_404(host_id)
+    if not _can_admin_host(host):
+        return jsonify({'error': 'forbidden'}), 403
+    ha = HostAlias.query.filter_by(host_id=host.id, alias=alias).first()
+    if ha:
+        db.session.delete(ha)
+        db.session.commit()
+    return jsonify({'aliases': [a.alias for a in host.aliases]})
+
+
 @app.route('/api/enroll/host', methods=['POST'])
 def api_enroll_host():
     """Token-authenticated host self-enrollment. Body: {token, public_key}."""
@@ -1800,12 +1892,20 @@ def api_enroll_host():
 # ==================== Internal cert helpers ====================
 
 def _do_issue_host_cert(host, requester_id, valid_days=365):
-    """Issue a host certificate. Caller is responsible for auth checks and commit."""
+    """Issue a host certificate. Caller is responsible for auth checks and commit.
+
+    Strict mode (admin setting): principals = hostname + all registered aliases.
+    Non-strict mode (default):   no -n flag → cert valid for any hostname.
+    """
+    if get_strict_host_principals():
+        principals = list(host.all_principals)
+    else:
+        principals = []
     with tempfile.NamedTemporaryFile(mode='w', delete=False, suffix='.pub') as f:
         f.write(host.host_key.public_key)
         tmp = f.name
     try:
-        cert_data, serial = cert_gen.generate_host_certificate(tmp, host.hostname, valid_days)
+        cert_data, serial = cert_gen.generate_host_certificate(tmp, principals, valid_days)
     finally:
         os.unlink(tmp)
     cert = Certificate(
@@ -1863,12 +1963,14 @@ def _ssh_add_machine(requester_user_id: int, data: dict) -> dict:
         host_key = (data.get('host_key') or '').strip()
         username = (data.get('user') or '').strip()
         user_key = (data.get('user_key') or '').strip()
+        connect_host = (data.get('connect_host') or '').strip()
         valid_days = max(1, min(int(data.get('valid_days', 365)), 3650))
+        enroll_host = bool(host_key)  # host enrollment is optional
 
-        if not all([hostname, host_key, username, user_key]):
-            return {'ok': False, 'error': 'hostname, host_key, user, user_key are required'}
+        if not username or not user_key or not hostname:
+            return {'ok': False, 'error': 'hostname, user, and user_key are required'}
 
-        if not host_key.startswith(ALLOWED_HOST_KEY_TYPE + ' '):
+        if enroll_host and not host_key.startswith(ALLOWED_HOST_KEY_TYPE + ' '):
             return {'ok': False, 'error': f'host key must be {ALLOWED_HOST_KEY_TYPE}'}
 
         allowed_user_types = get_allowed_user_key_types()
@@ -1878,52 +1980,61 @@ def _ssh_add_machine(requester_user_id: int, data: dict) -> dict:
                     'error': f'user key type {user_key_type!r} not allowed; '
                              f'accepted: {", ".join(allowed_user_types)}'}
 
-        # ── Host SSH key ──────────────────────────────────────────────────────
-        host_ssh_key = _get_or_create_ssh_key(host_key, 'host')
-        db.session.flush()
+        host = None
+        hu = None
+        host_cert_data = None
 
-        # ── Host ─────────────────────────────────────────────────────────────
-        host = Host.query.filter_by(host_key_id=host_ssh_key.id).first()
-        if host is None:
-            host = Host.query.filter_by(hostname=hostname).first()
+        if enroll_host:
+            # ── Host SSH key ──────────────────────────────────────────────────
+            host_ssh_key = _get_or_create_ssh_key(host_key, 'host')
+            db.session.flush()
 
-        if host is None:
-            host = Host(
-                hostname=hostname,
-                description=f'Added via sshadmin_add by {requester.username}',
-                created_by_id=requester.id,
-                host_key_id=host_ssh_key.id,
-                enrolled_at=datetime.utcnow(),
-            )
-            db.session.add(host)
+            # ── Host ─────────────────────────────────────────────────────────
+            host = Host.query.filter_by(host_key_id=host_ssh_key.id).first()
+            if host is None:
+                host = Host.query.filter_by(hostname=hostname).first()
+
+            if host is None:
+                host = Host(
+                    hostname=hostname,
+                    description=f'Added via sshadmin_add by {requester.username}',
+                    created_by_id=requester.id,
+                    host_key_id=host_ssh_key.id,
+                    enrolled_at=datetime.utcnow(),
+                )
+                db.session.add(host)
+            else:
+                # Host already exists. Presenting the host key proves root/sudo
+                # access to the machine, so add the requester as co-owner rather
+                # than rejecting. _get_or_create_host_user below handles this.
+                host.host_key_id = host_ssh_key.id
+                host.enrolled_at = datetime.utcnow()
+                host.enrollment_token = None
+                host.enrollment_expires_at = None
+            db.session.flush()
+
+            hu = _get_or_create_host_user(host.id, requester.id, 'owner')
+            db.session.flush()
         else:
-            # Existing host: requester must already have owner access or be admin
-            existing_hu = HostUsers.query.filter_by(
-                host_id=host.id, user_id=requester.id).first()
-            if not requester.is_admin and (
-                existing_hu is None or existing_hu.role != 'owner'
-            ):
-                return {
-                    'ok': False,
-                    'error': (f'host {host.hostname!r} is already managed by another user; '
-                              'ask them to share owner access or contact an admin'),
-                }
-            host.host_key_id = host_ssh_key.id
-            host.enrolled_at = datetime.utcnow()
-            host.enrollment_token = None
-            host.enrollment_expires_at = None
-        db.session.flush()
-
-        # ── HostUsers (owner — sshadmin_add proves sudo/root access) ─────────
-        hu = _get_or_create_host_user(host.id, requester.id, 'owner')
-        db.session.flush()
+            # No host key supplied — look up or create a placeholder host record
+            # so the user credential has somewhere to live.
+            host = Host.query.filter_by(hostname=hostname).first()
+            if host is None:
+                host = Host(
+                    hostname=hostname,
+                    description=f'Added via sshadmin_add by {requester.username} (key pending)',
+                    created_by_id=requester.id,
+                )
+                db.session.add(host)
+                db.session.flush()
+            hu = _get_or_create_host_user(host.id, requester.id, 'owner')
+            db.session.flush()
 
         # ── User SSH key ──────────────────────────────────────────────────────
         norm_user_key = _normalize_pubkey(user_key)
         user_ssh_key = _get_or_create_ssh_key(norm_user_key, 'user')
         db.session.flush()
 
-        # Duplicate-key guard across users
         existing_cred = UserCredential.query.filter_by(
             user_key_id=user_ssh_key.id).first()
         if existing_cred and existing_cred.user_id != requester.id:
@@ -1937,7 +2048,6 @@ def _ssh_add_machine(requester_user_id: int, data: dict) -> dict:
                       f'now also on {hostname} — private key may have been copied',
                       flush=True)
 
-        # ── UserCredential ────────────────────────────────────────────────────
         cred = UserCredential.query.filter_by(
             user_id=requester.id, user_key_id=user_ssh_key.id).first()
         if cred is None:
@@ -1950,9 +2060,15 @@ def _ssh_add_machine(requester_user_id: int, data: dict) -> dict:
             db.session.add(cred)
         db.session.flush()
 
+        # ── Store connect_host as alias (auto-expands principals in strict mode) ─
+        if enroll_host and connect_host and connect_host != hostname:
+            _get_or_create_host_alias(host.id, connect_host)
+            db.session.flush()
+
         # ── Issue certs ───────────────────────────────────────────────────────
         try:
-            host_cert = _do_issue_host_cert(host, requester.id, valid_days)
+            if enroll_host and host.host_key_id and os.path.exists(cert_gen.ca_key):
+                host_cert_data = _do_issue_host_cert(host, requester.id, valid_days)
             user_cert = _do_issue_user_cert(cred, requester.id, [username], valid_days)
             db.session.commit()
         except Exception as exc:
@@ -1966,9 +2082,10 @@ def _ssh_add_machine(requester_user_id: int, data: dict) -> dict:
 
         return {
             'ok': True,
-            'host_cert': host_cert.strip(),
+            'host_cert': host_cert_data.strip() if host_cert_data else None,
             'user_cert': user_cert.strip(),
             'ca_pubkey': ca_pubkey,
+            'host_enrolled': enroll_host,
         }
 
 
@@ -2084,6 +2201,74 @@ def _ssh_renew_host_cert(requester_user_id: int, data: dict) -> dict:
         return {'ok': True, 'host_cert': cert_data, 'ca_pubkey': ca_pubkey}
 
 
+def _ssh_add_alias(requester_user_id: int, data: dict) -> dict:
+    """Add a hostname/IP alias to a host and re-issue the host certificate.
+
+    data keys:
+      hostname   — registered hostname of the host
+      host_key   — SSH public key string (proves caller has root access)
+      alias      — new alias to add (hostname, FQDN, or IP)
+      valid_days — (optional) integer
+    """
+    with app.app_context():
+        hostname = (data.get('hostname') or '').strip()
+        host_key = (data.get('host_key') or '').strip()
+        alias = (data.get('alias') or '').strip()
+        valid_days = int(data.get('valid_days') or 365)
+
+        if not hostname or not host_key or not alias:
+            return {'ok': False, 'error': 'hostname, host_key, and alias are required'}
+
+        # Find host by host key first (more reliable than hostname alone).
+        norm_key = ' '.join(host_key.split()[:2])
+        host_key_row = SSHKey.query.filter(
+            SSHKey.public_key.like(norm_key + '%'),
+            SSHKey.key_type == 'host',
+        ).first()
+        host = Host.query.filter_by(host_key_id=host_key_row.id).first() if host_key_row else None
+        if host is None:
+            host = Host.query.filter_by(hostname=hostname).first()
+        if host is None or not host.is_enrolled:
+            return {'ok': False, 'error': f'Host {hostname!r} not found or not enrolled'}
+
+        # Verify key matches the enrolled host.
+        supplied = host_key.split()[:2]
+        enrolled = (host.public_key or '').split()[:2]
+        if supplied != enrolled:
+            return {'ok': False, 'error': 'Supplied host key does not match enrolled key'}
+
+        hu = HostUsers.query.filter_by(host_id=host.id, user_id=requester_user_id).first()
+        if not hu:
+            return {'ok': False, 'error': 'You are not an owner of this host'}
+
+        if not cert_gen.check_ca_keys():
+            return {'ok': False, 'error': 'CA not configured'}
+
+        _get_or_create_host_alias(host.id, alias)
+        db.session.flush()
+
+        try:
+            cert_data = _do_issue_host_cert(host, requester_user_id, valid_days)
+            db.session.commit()
+        except Exception as exc:
+            db.session.rollback()
+            return {'ok': False, 'error': str(exc)}
+
+        ca_pubkey = None
+        try:
+            with open(cert_gen.ca_pubkey) as f:
+                ca_pubkey = f.read().strip()
+        except Exception:
+            pass
+
+        return {
+            'ok': True,
+            'host_cert': cert_data,
+            'ca_pubkey': ca_pubkey,
+            'aliases': [a.alias for a in host.aliases],
+        }
+
+
 # ==================== Admin Settings ====================
 
 @app.route('/admin/settings', methods=['GET', 'POST'])
@@ -2100,6 +2285,14 @@ def admin_settings():
             cfg.value = ','.join(chosen)
         else:
             db.session.add(SiteConfig(key='allowed_user_key_types', value=','.join(chosen)))
+
+        strict = '1' if request.form.get('strict_host_principals') else '0'
+        cfg_strict = db.session.get(SiteConfig, 'strict_host_principals')
+        if cfg_strict:
+            cfg_strict.value = strict
+        else:
+            db.session.add(SiteConfig(key='strict_host_principals', value=strict))
+
         db.session.commit()
         flash('Settings saved.', 'success')
         return redirect(url_for('admin_settings'))
@@ -2107,7 +2300,8 @@ def admin_settings():
     current_types = set(get_allowed_user_key_types())
     return render_template('admin_settings.html',
                            all_key_type_options=ALL_USER_KEY_TYPE_OPTIONS,
-                           current_types=current_types)
+                           current_types=current_types,
+                           strict_host_principals=get_strict_host_principals())
 
 
 # ==================== Error handlers ====================
@@ -2153,6 +2347,7 @@ def _start_ssh_auth_server_if_enabled():
                 'finalize_challenge': _finalize_consumed_challenge,
                 'get_cert': _ssh_get_cert,
                 'add_machine': _ssh_add_machine,
+                'add_alias': _ssh_add_alias,
                 'renew_user_cert': _ssh_renew_user_cert,
                 'renew_host_cert': _ssh_renew_host_cert,
             },

@@ -89,10 +89,19 @@ chmod 644 "$CA_PUB"
 mkdir -p "$(dirname "$SSHD_DROPIN")"
 cat > "$SSHD_DROPIN" <<EOF
 # Managed by sshadmin enrollment
-TrustedUserCAKeys $CA_PUB
+HostKey ${HOST_KEY}
 HostCertificate ${HOST_KEY}-cert.pub
+TrustedUserCAKeys $CA_PUB
 EOF
 chmod 644 "$SSHD_DROPIN"
+
+# Ensure the main sshd_config includes the drop-in directory.
+# Modern OpenSSH distro packages add this automatically, but minimal/Alpine
+# installs sometimes omit it, causing the drop-in to be silently ignored.
+if ! grep -qE '^[[:space:]]*Include[[:space:]].*sshd_config\.d' "$SSHD_CONFIG" 2>/dev/null; then
+  echo "Adding 'Include /etc/ssh/sshd_config.d/*.conf' to $SSHD_CONFIG..."
+  printf '\n# Added by sshadmin enrollment\nInclude /etc/ssh/sshd_config.d/*.conf\n' >> "$SSHD_CONFIG"
+fi
 
 # Register this host's public key with sshadmin.
 echo "Registering host with sshadmin..."
@@ -122,12 +131,18 @@ else
 fi
 
 # Reload sshd so the new key, drop-in, and certificate take effect.
-if command -v systemctl >/dev/null && systemctl is-active --quiet ssh 2>/dev/null; then
+if command -v systemctl >/dev/null 2>&1 && systemctl is-active --quiet ssh 2>/dev/null; then
   systemctl reload ssh
-elif command -v systemctl >/dev/null && systemctl is-active --quiet sshd 2>/dev/null; then
+elif command -v systemctl >/dev/null 2>&1 && systemctl is-active --quiet sshd 2>/dev/null; then
   systemctl reload sshd
+elif command -v rc-service >/dev/null 2>&1; then
+  rc-service sshd reload 2>/dev/null || rc-service sshd restart 2>/dev/null || true
+elif [ -f /var/run/sshd.pid ]; then
+  kill -HUP "$(cat /var/run/sshd.pid)" 2>/dev/null || true
 else
   echo "NOTE: reload sshd manually to pick up the new configuration."
+  echo "      Alpine/OpenRC: rc-service sshd reload"
+  echo "      systemd:       systemctl reload sshd"
 fi
 
 echo "Enrollment complete."

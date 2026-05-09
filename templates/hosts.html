@@ -10,12 +10,17 @@
             <i class="bi bi-plus-circle"></i> Add Host
         </a>
         <div class="text-end">
-            <a href="{{ url_for('download_sshadmin_add') }}" class="btn btn-outline-secondary">
-                <i class="bi bi-download"></i> sshadmin_add
-            </a>
+            <div class="d-flex gap-1">
+              <a href="{{ url_for('download_sshadmin_add') }}" class="btn btn-outline-secondary btn-sm">
+                <i class="bi bi-download"></i> sshadmin (sh)
+              </a>
+              <a href="{{ url_for('download_sshadmin_ps1') }}" class="btn btn-outline-secondary btn-sm">
+                <i class="bi bi-download"></i> sshadmin (ps1)
+              </a>
+            </div>
             <div class="text-muted" style="font-size:.75rem; margin-top:2px">
                 Run on <strong>this machine</strong> to enroll another:
-                <code>sshadmin_add user@new-host</code>
+                <code>sshadmin user@new-host</code>
             </div>
         </div>
     </div>

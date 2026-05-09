@@ -98,7 +98,7 @@
               <hr class="my-3"/>
               <p class="small fw-semibold mb-1">
                 <i class="bi bi-lightning-charge-fill text-warning"></i>
-                Option C &mdash; Zero-touch via <code>sshadmin_add</code> (does everything automatically)
+                Option C &mdash; Zero-touch via <code>sshadmin</code> (does everything automatically)
               </p>
               <p class="small text-muted mb-1">
                 If you already have SSH access to this machine from another enrolled machine,
@@ -109,14 +109,14 @@
                         data-copy-target="linux-cmd-c">
                   <i class="bi bi-clipboard"></i> Copy
                 </button>
-                <pre class="cmd" id="linux-cmd-c">curl -fsSL "{{ url_for('download_sshadmin_add', _external=True) }}" -o sshadmin_add && chmod +x sshadmin_add
-./sshadmin_add youruser@this-host</pre>
+                <pre class="cmd" id="linux-cmd-c">curl -fsSL "{{ url_for('download_sshadmin_add', _external=True) }}" -o sshadmin && chmod +x sshadmin
+./sshadmin $USER@$(hostname -s)</pre>
               </div>
               <p class="small text-muted">
                 This generates keys, registers them with sshadmin, installs certificates,
                 and configures sshd — all in one step. The registration flow below is
                 still needed for your first account if you don't yet have
-                <code>sshadmin_add</code>.
+                <code>sshadmin</code>.
               </p>
             </div>
 
