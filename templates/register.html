@@ -2,87 +2,409 @@
 
 {% block title %}Register - SSH Certificate Admin{% endblock %}
 
+{% block extra_css %}
+<style>
+  pre.cmd {
+    background-color: #1e1e1e;
+    color: #d4d4d4;
+    padding: 0.75rem 1rem;
+    border-radius: 6px;
+    font-size: 0.82rem;
+    line-height: 1.5;
+    overflow-x: auto;
+    white-space: pre;
+  }
+  .copy-wrap { position: relative; }
+  .copy-btn  { position: absolute; top: 0.4rem; right: 0.4rem; }
+  .tab-pane .lead { font-size: 0.95rem; }
+</style>
+{% endblock %}
+
 {% block content %}
-<div class="container mt-5">
+<div class="container mt-4">
   <div class="row justify-content-center">
-    <div class="col-md-8">
-      <div class="card shadow-lg">
-        <div class="card-body p-4">
-          <h2 class="text-center mb-3">
-            <i class="bi bi-shield-lock"></i> SSH Cert Admin
-          </h2>
-          <h5 class="text-center mb-4 text-muted">Create Account</h5>
+    <div class="col-lg-9">
 
-          <p class="text-muted small">
-            Registration is verified by signing a one-time challenge with the
-            private half of an SSH keypair. Submit your username and SSH public
-            key &mdash; the next page will give you a one-line command to run on
-            a machine that holds your private key.
-          </p>
-          <p class="text-muted small">
-            On success, sshadmin also registers this username + public key as
-            your default SSH user identity, so you can be issued user
-            certificates immediately.
-          </p>
+      <h2 class="text-center mb-1">
+        <i class="bi bi-shield-lock"></i> Create Account
+      </h2>
+      <p class="text-center text-muted small mb-4">
+        Registration is verified by signing a one-time challenge with your SSH private key.
+      </p>
 
-          <form method="POST">
-            <div class="mb-3">
-              <label for="username" class="form-label">Account Name <span class="text-danger">*</span></label>
-              <input type="text" class="form-control form-control-lg" id="username" name="username"
-                     placeholder="e.g. jdoe" autocomplete="username" required>
-              <small class="form-text text-muted">
-                Your sshadmin account name. This is distinct from your OS login name.
-              </small>
+      {# ── Step 1: Generate a key ───────────────────────────────────────────── #}
+      <div class="card shadow-sm mb-4">
+        <div class="card-header fw-semibold">
+          Step 1 &mdash; Generate an SSH Key Pair
+        </div>
+        <div class="card-body p-0">
+
+          <ul class="nav nav-tabs px-3 pt-2" id="keygenTabs" role="tablist">
+            <li class="nav-item"><button class="nav-link active" data-bs-toggle="tab"
+                data-bs-target="#tab-linux" type="button">
+              <i class="bi bi-terminal"></i> Linux / macOS
+            </button></li>
+            <li class="nav-item"><button class="nav-link" data-bs-toggle="tab"
+                data-bs-target="#tab-powershell" type="button">
+              <i class="bi bi-windows"></i> Windows (PowerShell)
+            </button></li>
+            <li class="nav-item"><button class="nav-link" data-bs-toggle="tab"
+                data-bs-target="#tab-putty" type="button">
+              <i class="bi bi-display"></i> PuTTY
+            </button></li>
+            <li class="nav-item"><button class="nav-link" data-bs-toggle="tab"
+                data-bs-target="#tab-teraterm" type="button">
+              <i class="bi bi-terminal-fill"></i> TeraTerm
+            </button></li>
+            <li class="nav-item"><button class="nav-link" data-bs-toggle="tab"
+                data-bs-target="#tab-dropbear" type="button">
+              <i class="bi bi-cpu"></i> Dropbear
+            </button></li>
+          </ul>
+
+          <div class="tab-content px-3 pb-3 pt-2">
+
+            {# ── Linux / macOS ─────────────────────────────────────────────── #}
+            <div class="tab-pane fade show active" id="tab-linux">
+              <p class="text-muted small mt-2 mb-2">
+                Requires <code>ssh-keygen</code> (part of OpenSSH, installed by default
+                on Linux and macOS).
+              </p>
+
+              <p class="small fw-semibold mb-1">Option A &mdash; sshadmin dedicated key (recommended)</p>
+              <div class="copy-wrap mb-2">
+                <button class="btn btn-sm btn-secondary copy-btn" type="button"
+                        data-copy-target="linux-cmd-a">
+                  <i class="bi bi-clipboard"></i> Copy
+                </button>
+                <pre class="cmd" id="linux-cmd-a">ssh-keygen -t ecdsa -b 521 -f ~/.ssh/id_sshadmin -C "$(whoami)@$(hostname -s)"</pre>
+              </div>
+              <p class="small text-muted mb-3">
+                Creates <code>~/.ssh/id_sshadmin</code> (private) and
+                <code>~/.ssh/id_sshadmin.pub</code> (public). Paste the contents of
+                the <code>.pub</code> file into Step 2 below:
+                <code class="ms-1">cat ~/.ssh/id_sshadmin.pub</code>
+              </p>
+
+              <p class="small fw-semibold mb-1">Option B &mdash; Ed25519 (also recommended)</p>
+              <div class="copy-wrap mb-2">
+                <button class="btn btn-sm btn-secondary copy-btn" type="button"
+                        data-copy-target="linux-cmd-b">
+                  <i class="bi bi-clipboard"></i> Copy
+                </button>
+                <pre class="cmd" id="linux-cmd-b">ssh-keygen -t ed25519 -f ~/.ssh/id_sshadmin -C "$(whoami)@$(hostname -s)"</pre>
+              </div>
+
+              <hr class="my-3"/>
+              <p class="small fw-semibold mb-1">
+                <i class="bi bi-lightning-charge-fill text-warning"></i>
+                Option C &mdash; Zero-touch via <code>sshadmin_add</code> (does everything automatically)
+              </p>
+              <p class="small text-muted mb-1">
+                If you already have SSH access to this machine from another enrolled machine,
+                download the helper script and run it — no manual key pasting needed:
+              </p>
+              <div class="copy-wrap mb-2">
+                <button class="btn btn-sm btn-secondary copy-btn" type="button"
+                        data-copy-target="linux-cmd-c">
+                  <i class="bi bi-clipboard"></i> Copy
+                </button>
+                <pre class="cmd" id="linux-cmd-c">curl -fsSL "{{ url_for('download_sshadmin_add', _external=True) }}" -o sshadmin_add && chmod +x sshadmin_add
+./sshadmin_add youruser@this-host</pre>
+              </div>
+              <p class="small text-muted">
+                This generates keys, registers them with sshadmin, installs certificates,
+                and configures sshd — all in one step. The registration flow below is
+                still needed for your first account if you don't yet have
+                <code>sshadmin_add</code>.
+              </p>
             </div>
 
-            <div class="mb-3">
-              <label for="unix_username" class="form-label">OS / Unix Username <span class="text-danger">*</span></label>
-              <input type="text" class="form-control" id="unix_username" name="unix_username"
-                     placeholder="e.g. alice" required>
-              <small class="form-text text-muted">
-                The login name you use on your machine (<code>whoami</code>). This becomes the
-                principal in your user certificate and must match the account you SSH from.
-              </small>
+            {# ── Windows PowerShell ────────────────────────────────────────── #}
+            <div class="tab-pane fade" id="tab-powershell">
+              <p class="text-muted small mt-2 mb-2">
+                Requires <strong>Windows 10 version 1809+</strong> or
+                <strong>Windows Server 2019+</strong> with the
+                <em>OpenSSH Client</em> optional feature installed.
+                Run in a regular (non-admin) PowerShell session.
+              </p>
+
+              <p class="small fw-semibold mb-1">Generate ECDSA P-521 key</p>
+              <div class="copy-wrap mb-2">
+                <button class="btn btn-sm btn-secondary copy-btn" type="button"
+                        data-copy-target="ps-cmd-a">
+                  <i class="bi bi-clipboard"></i> Copy
+                </button>
+                <pre class="cmd" id="ps-cmd-a">ssh-keygen -t ecdsa -b 521 -f "$env:USERPROFILE\.ssh\id_sshadmin" -C "$env:USERNAME@$env:COMPUTERNAME"</pre>
+              </div>
+
+              <p class="small fw-semibold mb-1">Display the public key to paste into Step 2</p>
+              <div class="copy-wrap mb-2">
+                <button class="btn btn-sm btn-secondary copy-btn" type="button"
+                        data-copy-target="ps-cmd-b">
+                  <i class="bi bi-clipboard"></i> Copy
+                </button>
+                <pre class="cmd" id="ps-cmd-b">Get-Content "$env:USERPROFILE\.ssh\id_sshadmin.pub"</pre>
+              </div>
+
+              <p class="small fw-semibold mb-1">Generate Ed25519 key (alternative)</p>
+              <div class="copy-wrap mb-2">
+                <button class="btn btn-sm btn-secondary copy-btn" type="button"
+                        data-copy-target="ps-cmd-c">
+                  <i class="bi bi-clipboard"></i> Copy
+                </button>
+                <pre class="cmd" id="ps-cmd-c">ssh-keygen -t ed25519 -f "$env:USERPROFILE\.ssh\id_sshadmin" -C "$env:USERNAME@$env:COMPUTERNAME"</pre>
+              </div>
+
+              <p class="text-muted small mb-0">
+                If <code>ssh-keygen</code> is not found, install the optional feature:<br>
+                <code>Add-WindowsCapability -Online -Name OpenSSH.Client~~~~0.0.1.0</code>
+              </p>
             </div>
 
-            <div class="mb-3">
-              <label for="public_key" class="form-label">SSH Public Key <span class="text-danger">*</span></label>
-              <textarea class="form-control" id="public_key" name="public_key" rows="4"
-                        placeholder="ecdsa-sha2-nistp521 AAAA... user@host" required></textarea>
-              <small class="form-text text-muted">
-                Allowed key types: {{ allowed_key_types|join(', ') }}.
-                Get yours with <code>cat ~/.ssh/id_ecdsa.pub</code> (or <code>id_ed25519.pub</code>).
-              </small>
+            {# ── PuTTY ─────────────────────────────────────────────────────── #}
+            <div class="tab-pane fade" id="tab-putty">
+              <p class="text-muted small mt-2 mb-2">
+                Use <strong>PuTTYgen</strong> (included with PuTTY) to generate a key.
+                PuTTY 0.78+ supports ECDSA and Ed25519.
+              </p>
+              <ol class="small">
+                <li>Open <strong>PuTTYgen</strong> (search the Start menu).</li>
+                <li>Under <em>Type of key to generate</em>, select
+                    <strong>ECDSA</strong> and set the curve to
+                    <strong>nistp521</strong> — or select <strong>EdDSA</strong>
+                    for Ed25519.</li>
+                <li>Click <strong>Generate</strong> and move your mouse over
+                    the blank area to generate entropy.</li>
+                <li>Set a <em>Key comment</em> (e.g.
+                    <code>yourname@yourpc-sshadmin</code>) and optionally a
+                    passphrase.</li>
+                <li>Click <strong>Save private key</strong> — keep this file safe.</li>
+                <li>The text box at the top shows the <strong>OpenSSH public key</strong>
+                    (starting with <code>ecdsa-sha2-nistp521</code> or
+                    <code>ssh-ed25519</code>). Copy the entire line and paste it
+                    into Step 2 below.</li>
+              </ol>
+              <div class="alert alert-info small mb-0">
+                <i class="bi bi-info-circle"></i>
+                PuTTY uses its own <code>.ppk</code> private key format. To complete
+                the registration challenge (Step 3), use the
+                <strong>SSH option</strong> on the next page — connect to sshadmin's
+                SSH server with PuTTY and submit the token interactively.
+              </div>
             </div>
 
-            <button type="submit" class="btn btn-primary btn-lg w-100 mb-3">
-              <i class="bi bi-key"></i> Begin Registration
-            </button>
-          </form>
+            {# ── TeraTerm ──────────────────────────────────────────────────── #}
+            <div class="tab-pane fade" id="tab-teraterm">
+              <p class="text-muted small mt-2 mb-2">
+                TeraTerm 4.x+ includes a built-in SSH key generator.
+              </p>
+              <ol class="small">
+                <li>Open TeraTerm. Go to <strong>Setup &rarr; SSH Key Generation&hellip;</strong></li>
+                <li>Select <strong>ECDSA</strong> and bits <strong>521</strong>
+                    (or <strong>ED25519</strong>).</li>
+                <li>Click <strong>Generate</strong>. Move the mouse over the blank
+                    progress bar to generate entropy.</li>
+                <li>Optionally add a passphrase.</li>
+                <li>Click <strong>Save public key</strong> — save as
+                    <code>id_sshadmin.pub</code>.</li>
+                <li>Click <strong>Save private key</strong> — save as
+                    <code>id_sshadmin</code> (or <code>id_sshadmin.ppk</code>).</li>
+                <li>Open the saved <code>.pub</code> file in a text editor.
+                    Copy the line that starts with
+                    <code>ecdsa-sha2-nistp521</code> or <code>ssh-ed25519</code>
+                    and paste it into Step 2 below.</li>
+              </ol>
+              <div class="alert alert-info small mb-0">
+                <i class="bi bi-info-circle"></i>
+                To complete the challenge (Step 3), use the
+                <strong>SSH option</strong> on the next page to connect to the
+                sshadmin SSH server with TeraTerm and submit the token interactively.
+              </div>
+            </div>
 
-          <div class="text-center">
-            <p class="text-muted small mb-0">
-              Already have an account? <a href="{{ url_for('login') }}">Log in</a>
-            </p>
-          </div>
+            {# ── Dropbear ──────────────────────────────────────────────────── #}
+            <div class="tab-pane fade" id="tab-dropbear">
+              <p class="text-muted small mt-2 mb-2">
+                Dropbear uses its own key format, but you can generate an
+                OpenSSH-compatible public key to paste here.
+              </p>
+
+              <p class="small fw-semibold mb-1">Generate a key with dropbearkey</p>
+              <div class="copy-wrap mb-2">
+                <button class="btn btn-sm btn-secondary copy-btn" type="button"
+                        data-copy-target="db-cmd-a">
+                  <i class="bi bi-clipboard"></i> Copy
+                </button>
+                <pre class="cmd" id="db-cmd-a">dropbearkey -t ecdsa -s 521 -f ~/.ssh/id_sshadmin_dropbear</pre>
+              </div>
+
+              <p class="small fw-semibold mb-1">
+                Extract the OpenSSH-format public key (paste this into Step 2)
+              </p>
+              <div class="copy-wrap mb-2">
+                <button class="btn btn-sm btn-secondary copy-btn" type="button"
+                        data-copy-target="db-cmd-b">
+                  <i class="bi bi-clipboard"></i> Copy
+                </button>
+                <pre class="cmd" id="db-cmd-b">dropbearkey -y -f ~/.ssh/id_sshadmin_dropbear | grep "^ecdsa"</pre>
+              </div>
+
+              <p class="small fw-semibold mb-1">
+                To complete the challenge using <code>dbclient</code> (Step 3)
+              </p>
+              <div class="copy-wrap mb-2">
+                <button class="btn btn-sm btn-secondary copy-btn" type="button"
+                        data-copy-target="db-cmd-c">
+                  <i class="bi bi-clipboard"></i> Copy
+                </button>
+                <pre class="cmd" id="db-cmd-c">dbclient -p {{ ssh_port or '2222' }} -i ~/.ssh/id_sshadmin_dropbear {{ sshadmin_host or 'sshadmin-host' }}</pre>
+              </div>
+              <p class="small text-muted mb-0">
+                Then paste the token shown on the next page when sshadmin prompts
+                <code>Token:</code>.
+              </p>
+
+              <div class="alert alert-warning small mt-3 mb-0">
+                <i class="bi bi-exclamation-triangle"></i>
+                Dropbear's <code>dbclient</code> does not support
+                <code>ssh-keygen -Y sign</code> (the SSHSIG format used by the
+                one-liner script). Use the <strong>SSH interactive option</strong>
+                on the next page instead.
+              </div>
+            </div>
+
+          </div>{# /tab-content #}
         </div>
       </div>
 
-      <div class="card mt-3 border-0 bg-light">
+      {# ── Step 2: Registration form ────────────────────────────────────────── #}
+      <div class="card shadow-sm mb-3">
+        <div class="card-header fw-semibold">Step 2 &mdash; Submit Your Details</div>
+        <div class="card-body">
+          <form method="POST" id="register-form" novalidate>
+            <div class="row g-3">
+              <div class="col-sm-6">
+                <label for="username" class="form-label">
+                  sshadmin Account Name <span class="text-danger">*</span>
+                </label>
+                <input type="text" class="form-control" id="username" name="username"
+                       placeholder="e.g. jdoe" autocomplete="username" required>
+                <div class="form-text">Your login name for this web UI.</div>
+              </div>
+              <div class="col-sm-6">
+                <label for="unix_username" class="form-label">
+                  OS / Unix Username <span class="text-danger">*</span>
+                </label>
+                <input type="text" class="form-control" id="unix_username" name="unix_username"
+                       placeholder="e.g. alice" required>
+                <div class="form-text">
+                  Output of <code>whoami</code> on your machine — becomes the certificate
+                  principal.
+                </div>
+              </div>
+              <div class="col-12">
+                <label for="public_key" class="form-label">
+                  SSH Public Key <span class="text-danger">*</span>
+                </label>
+                <textarea class="form-control font-monospace" id="public_key" name="public_key"
+                          rows="3" placeholder="ecdsa-sha2-nistp521 AAAA... user@host"
+                          required></textarea>
+                <div class="form-text">
+                  Accepted types: <span id="allowed-types">{{ allowed_key_types | join(', ') }}</span>.
+                  Copy the <code>.pub</code> file contents from Step 1.
+                </div>
+              </div>
+            </div>
+
+            <button type="submit" class="btn btn-primary btn-lg w-100 mt-4">
+              <i class="bi bi-key"></i> Begin Registration
+            </button>
+          </form>
+        </div>
+      </div>
+
+      <div class="card border-0 bg-light mb-3">
         <div class="card-body py-2 px-3">
           <p class="small text-muted mb-1">
             <i class="bi bi-info-circle"></i>
-            <strong>Trust host certificates</strong> &mdash; once registered, add the CA to
-            <code>~/.ssh/known_hosts</code> so SSH auto-accepts managed servers without prompts:
+            <strong>Trust host certificates</strong> — add the CA to
+            <code>~/.ssh/known_hosts</code> so SSH auto-accepts managed servers:
           </p>
           <pre class="bg-white border rounded p-2 mb-1" style="font-size:0.75rem;white-space:pre-wrap;">echo "@cert-authority * $(curl -fsSL '{{ url_for('api_ca_pubkey', _external=True) }}')" >> ~/.ssh/known_hosts</pre>
           <p class="small text-muted mb-0">
-            PuTTY / TeraTerm instructions are on the
-            <a href="{{ url_for('server_config') }}">Server Configuration</a> page (login required).
+            Already have an account? <a href="{{ url_for('login') }}">Log in</a>
           </p>
         </div>
+      </div>
+
+    </div>
+  </div>
+</div>
+
+{# ── Unsupported key type modal ───────────────────────────────────────────── #}
+<div class="modal fade" id="keyTypeModal" tabindex="-1" aria-labelledby="keyTypeModalLabel"
+     aria-modal="true" role="dialog">
+  <div class="modal-dialog modal-dialog-centered">
+    <div class="modal-content border-danger border-2">
+      <div class="modal-header bg-danger text-white">
+        <h5 class="modal-title" id="keyTypeModalLabel">
+          <i class="bi bi-x-octagon-fill me-2"></i>Unsupported Key Type
+        </h5>
+      </div>
+      <div class="modal-body">
+        <p class="mb-2" id="key-error-body">
+          The public key you entered uses a key type that is not accepted.
+        </p>
+        <p class="text-muted small mb-0">
+          Accepted types: <strong id="modal-allowed-types"></strong>.<br>
+          Go back to <strong>Step 1</strong> and generate a key using one of the
+          supported types.
+        </p>
+      </div>
+      <div class="modal-footer">
+        <button type="button" class="btn btn-danger" data-bs-dismiss="modal">OK</button>
       </div>
     </div>
   </div>
 </div>
+{% endblock %}
+
+{% block extra_js %}
+<script>
+(function () {
+  var ALLOWED = {{ allowed_key_types | tojson }};
+
+  // Copy buttons
+  document.querySelectorAll('[data-copy-target]').forEach(function (btn) {
+    btn.addEventListener('click', function () {
+      var pre = document.getElementById(btn.getAttribute('data-copy-target'));
+      if (!pre) return;
+      navigator.clipboard.writeText(pre.innerText).then(function () {
+        var orig = btn.innerHTML;
+        btn.innerHTML = '<i class="bi bi-check2"></i> Copied';
+        setTimeout(function () { btn.innerHTML = orig; }, 1500);
+      });
+    });
+  });
+
+  // Key-type validation on submit — show modal instead of server-side flash
+  var form = document.getElementById('register-form');
+  var modal = new bootstrap.Modal(document.getElementById('keyTypeModal'));
+  document.getElementById('modal-allowed-types').textContent = ALLOWED.join(', ');
+
+  form.addEventListener('submit', function (e) {
+    var raw = document.getElementById('public_key').value.trim();
+    if (!raw) return; // let HTML5 required handle the empty case
+    var keyType = raw.split(/\s+/)[0];
+    if (ALLOWED.indexOf(keyType) === -1) {
+      e.preventDefault();
+      document.getElementById('key-error-body').textContent =
+        'The public key you entered has type “' + keyType +
+        '”, which is not accepted by this server.';
+      modal.show();
+    }
+  });
+})();
+</script>
 {% endblock %}

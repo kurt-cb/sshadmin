@@ -363,10 +363,32 @@ def _serve_exec(channel, server_iface, app, models):
             channel.sendall((_json.dumps(result) + '\n').encode())
             exit_status = 0 if result.get('ok') else 1
 
+        elif verb in ('renew_user_cert', 'renew_host_cert'):
+            if len(parts) != 2:
+                channel.send(f'Usage: ssh <user>@<host> {verb} <base64-json>\r\n'.encode())
+                exit_status = 2
+                return
+            try:
+                data = _json.loads(base64.b64decode(parts[1]))
+            except Exception:
+                channel.send(b'ERROR: invalid base64-JSON payload\r\n')
+                exit_status = 1
+                return
+            fn = models.get(verb)
+            if fn is None:
+                channel.send(f'ERROR: {verb} not available\r\n'.encode())
+                exit_status = 1
+                return
+            result = fn(server_iface.user_id, data)
+            channel.sendall((_json.dumps(result) + '\n').encode())
+            exit_status = 0 if result.get('ok') else 1
+
         else:
             channel.send(b'Usage: ssh <user>@<host> auth <token>\r\n')
             channel.send(b'       ssh <user>@<host> get_cert <subject>\r\n')
             channel.send(b'       ssh <user>@<host> add_machine <base64-json>\r\n')
+            channel.send(b'       ssh <user>@<host> renew_user_cert <base64-json>\r\n')
+            channel.send(b'       ssh <user>@<host> renew_host_cert <base64-json>\r\n')
             exit_status = 2
     finally:
         _close_channel(channel, exit_status=exit_status)

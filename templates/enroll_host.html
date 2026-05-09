@@ -14,14 +14,8 @@
     font-size: 0.85rem;
     line-height: 1.4;
   }
-  .copy-btn-wrap {
-    position: relative;
-  }
-  .copy-btn {
-    position: absolute;
-    top: 0.5rem;
-    right: 0.5rem;
-  }
+  .copy-btn-wrap { position: relative; }
+  .copy-btn      { position: absolute; top: 0.5rem; right: 0.5rem; }
 </style>
 {% endblock %}
 
@@ -31,42 +25,143 @@
 <div class="alert alert-warning" role="alert">
   <strong>One-time enrollment.</strong> This script contains a single-use token that
   expires <span title="{{ expires_at }}">at {{ expires_at.strftime('%Y-%m-%d %H:%M UTC') }}</span>.
-  Run it as <code>root</code> on <strong>{{ host.hostname }}</strong>. Anyone with this
-  token can register the host until enrollment completes — treat it like a password.
+  Anyone with this token can register the host until enrollment completes — treat it like a password.
 </div>
 
-<div class="card mb-3">
-  <div class="card-header d-flex justify-content-between align-items-center">
-    <span>Option 1: One-liner (fetch &amp; execute)</span>
-  </div>
-  <div class="card-body copy-btn-wrap">
-    <button class="btn btn-sm btn-secondary copy-btn" type="button" id="copy-oneliner-btn">
-      <i class="bi bi-clipboard"></i> Copy
+{# Tab list — Linux first for Linux hosts, Windows first for Windows hosts #}
+<ul class="nav nav-tabs mb-3" id="enrollTabs" role="tablist">
+  <li class="nav-item" role="presentation">
+    <button class="nav-link {% if host.host_type != 'windows' %}active{% endif %}"
+            id="tab-linux" data-bs-toggle="tab" data-bs-target="#pane-linux"
+            type="button" role="tab">
+      <i class="bi bi-terminal"></i> Linux / Unix
     </button>
-    <pre class="enrollment-script m-0" id="enrollment-oneliner">{{ one_liner }}</pre>
-    <p class="small text-muted mt-2 mb-0">
-      Runs as root on the target host. Downloads the script using the one-time token
-      and pipes it to <code>bash</code>. The token is validated server-side before the
-      script is returned.
-    </p>
-  </div>
-</div>
+  </li>
+  <li class="nav-item" role="presentation">
+    <button class="nav-link {% if host.host_type == 'windows' %}active{% endif %}"
+            id="tab-windows" data-bs-toggle="tab" data-bs-target="#pane-windows"
+            type="button" role="tab">
+      <i class="bi bi-windows"></i> Windows (PowerShell)
+    </button>
+  </li>
+</ul>
 
-<div class="card mb-3">
-  <div class="card-header d-flex justify-content-between align-items-center">
-    <span>Option 2: Copy &amp; paste the full script into a root shell</span>
-    <a class="btn btn-sm btn-outline-light"
-       href="{{ url_for('api_enroll_script', token=host.enrollment_token, host_id=host.id) }}">
-      <i class="bi bi-download"></i> Download .sh
-    </a>
+<div class="tab-content" id="enrollTabsContent">
+
+  {# ── Linux tab ─────────────────────────────────────────────────────────── #}
+  <div class="tab-pane fade {% if host.host_type != 'windows' %}show active{% endif %}"
+       id="pane-linux" role="tabpanel">
+
+    <div class="card mb-3">
+      <div class="card-header d-flex justify-content-between align-items-center">
+        <span>Option 1: One-liner (fetch &amp; execute — run as root)</span>
+      </div>
+      <div class="card-body copy-btn-wrap">
+        <button class="btn btn-sm btn-secondary copy-btn" type="button" id="copy-oneliner-btn">
+          <i class="bi bi-clipboard"></i> Copy
+        </button>
+        <pre class="enrollment-script m-0" id="enrollment-oneliner">{{ one_liner }}</pre>
+        <p class="small text-muted mt-2 mb-0">
+          Downloads the script using the one-time token and pipes it to <code>bash</code>.
+          The token is validated server-side before the script is returned.
+        </p>
+      </div>
+    </div>
+
+    <div class="card mb-3">
+      <div class="card-header d-flex justify-content-between align-items-center">
+        <span>Option 2: Copy &amp; paste the full script into a root shell</span>
+        <a class="btn btn-sm btn-outline-light"
+           href="{{ url_for('api_enroll_script', token=host.enrollment_token, host_id=host.id) }}">
+          <i class="bi bi-download"></i> Download .sh
+        </a>
+      </div>
+      <div class="card-body copy-btn-wrap p-0">
+        <button class="btn btn-sm btn-secondary copy-btn" type="button" id="copy-script-btn">
+          <i class="bi bi-clipboard"></i> Copy
+        </button>
+        <pre class="enrollment-script m-0" id="enrollment-script">{{ script }}</pre>
+      </div>
+    </div>
+
+    <div class="card mb-3">
+      <div class="card-header">What this script does</div>
+      <div class="card-body">
+        <ol class="mb-0 small">
+          <li>Generates a fresh <code>ecdsa-sha2-nistp521</code> host key at
+            <code>/etc/ssh/ssh_host_sshadmin_ecdsa_key</code> if one does not already exist.</li>
+          <li>Downloads the sshadmin CA public key to <code>/etc/ssh/sshadmin_ca.pub</code>
+            and writes <code>/etc/ssh/sshd_config.d/99-sshadmin.conf</code> with
+            <code>TrustedUserCAKeys</code> + <code>HostCertificate</code> directives.</li>
+          <li>POSTs the host public key + token to <code>/api/enroll/host</code>;
+            the server validates the key type and marks the host enrolled.</li>
+          <li>Reloads <code>sshd</code> so the new config takes effect.</li>
+        </ol>
+      </div>
+    </div>
   </div>
-  <div class="card-body copy-btn-wrap p-0">
-    <button class="btn btn-sm btn-secondary copy-btn" type="button" id="copy-script-btn">
-      <i class="bi bi-clipboard"></i> Copy
-    </button>
-    <pre class="enrollment-script m-0" id="enrollment-script">{{ script }}</pre>
+
+  {# ── Windows tab ───────────────────────────────────────────────────────── #}
+  <div class="tab-pane fade {% if host.host_type == 'windows' %}show active{% endif %}"
+       id="pane-windows" role="tabpanel">
+
+    <div class="alert alert-info small">
+      <strong>Requirements:</strong> Windows 10 / Server 2019+ with the
+      <strong>OpenSSH Server</strong> optional feature installed
+      (<code>Add-WindowsCapability -Online -Name OpenSSH.Server~~~~0.0.1.0</code>).
+      Run the commands below in an <strong>Administrator</strong> PowerShell session.
+    </div>
+
+    <div class="card mb-3">
+      <div class="card-header d-flex justify-content-between align-items-center">
+        <span>Option 1: One-liner (fetch &amp; execute — run as Administrator)</span>
+      </div>
+      <div class="card-body copy-btn-wrap">
+        <button class="btn btn-sm btn-secondary copy-btn" type="button" id="copy-ps1-oneliner-btn">
+          <i class="bi bi-clipboard"></i> Copy
+        </button>
+        <pre class="enrollment-script m-0" id="ps1-oneliner">{{ ps1_one_liner }}</pre>
+        <p class="small text-muted mt-2 mb-0">
+          Downloads and executes the PowerShell enrollment script using the one-time token.
+        </p>
+      </div>
+    </div>
+
+    <div class="card mb-3">
+      <div class="card-header d-flex justify-content-between align-items-center">
+        <span>Option 2: Copy &amp; paste the full script into an Administrator PowerShell</span>
+        <a class="btn btn-sm btn-outline-light"
+           href="{{ url_for('api_enroll_ps1_script', token=host.enrollment_token, host_id=host.id) }}">
+          <i class="bi bi-download"></i> Download .ps1
+        </a>
+      </div>
+      <div class="card-body copy-btn-wrap p-0">
+        <button class="btn btn-sm btn-secondary copy-btn" type="button" id="copy-ps1-script-btn">
+          <i class="bi bi-clipboard"></i> Copy
+        </button>
+        <pre class="enrollment-script m-0" id="ps1-script">{{ ps1_script }}</pre>
+      </div>
+    </div>
+
+    <div class="card mb-3">
+      <div class="card-header">What this script does</div>
+      <div class="card-body">
+        <ol class="mb-0 small">
+          <li>Generates a fresh <code>ecdsa-sha2-nistp521</code> host key at
+            <code>C:\ProgramData\ssh\ssh_host_sshadmin_ecdsa_key</code>.</li>
+          <li>Downloads the sshadmin CA public key to
+            <code>C:\ProgramData\ssh\sshadmin_ca.pub</code> and updates
+            <code>C:\ProgramData\ssh\sshd_config</code> with
+            <code>TrustedUserCAKeys</code> + <code>HostCertificate</code> directives.</li>
+          <li>POSTs the host public key + token to <code>/api/enroll/host</code>;
+            the server validates the key type and marks the host enrolled.</li>
+          <li>Restarts the <code>sshd</code> Windows service.</li>
+        </ol>
+      </div>
+    </div>
   </div>
-</div>
+
+</div>{# /tab-content #}
 
 <div class="d-flex gap-2">
   <form method="POST" action="{{ url_for('regenerate_enrollment', host_id=host.id) }}"
@@ -76,25 +171,6 @@
     </button>
   </form>
   <a href="{{ url_for('hosts') }}" class="btn btn-secondary">Back to Hosts</a>
-</div>
-
-<div class="card mt-4">
-  <div class="card-header">What this script does</div>
-  <div class="card-body">
-    <ol class="mb-0">
-      <li>Generates a fresh <code>ecdsa-sha2-nistp521</code> host key at
-        <code>/etc/ssh/ssh_host_ecdsa_key</code> if one does not already exist
-        (refuses to overwrite a non-matching existing key).</li>
-      <li>Downloads the sshadmin CA public key to
-        <code>/etc/ssh/sshadmin_ca.pub</code> and writes
-        <code>/etc/ssh/sshd_config.d/99-sshadmin.conf</code> with
-        <code>TrustedUserCAKeys</code> + <code>HostCertificate</code> directives.</li>
-      <li>POSTs the host's public key plus the one-time token to
-        <code>/api/enroll/host</code>; the server validates the key type and
-        marks this host enrolled.</li>
-      <li>Reloads <code>sshd</code> so the new config takes effect.</li>
-    </ol>
-  </div>
 </div>
 {% endblock %}
 
@@ -112,7 +188,9 @@
       });
     });
   }
-  wireCopy('copy-script-btn', 'enrollment-script');
-  wireCopy('copy-oneliner-btn', 'enrollment-oneliner');
+  wireCopy('copy-script-btn',       'enrollment-script');
+  wireCopy('copy-oneliner-btn',     'enrollment-oneliner');
+  wireCopy('copy-ps1-script-btn',   'ps1-script');
+  wireCopy('copy-ps1-oneliner-btn', 'ps1-oneliner');
 </script>
 {% endblock %}

@@ -1,7 +1,7 @@
 """
 SSH Certificate Admin - Web-based SSH certificate management system
 """
-__version__ = '0.0.7'
+__version__ = '0.0.8'
 from flask import Flask, render_template, request, jsonify, redirect, url_for, flash, session, Response
 from flask_sqlalchemy import SQLAlchemy
 from flask_login import LoginManager, UserMixin, login_user, logout_user, login_required, current_user
@@ -21,7 +21,22 @@ import qrcode
 import qrcode.image.svg
 
 ALLOWED_HOST_KEY_TYPE = 'ecdsa-sha2-nistp521'
-ALLOWED_USER_KEY_TYPES = ('ecdsa-sha2-nistp521', 'ssh-ed25519', 'ecdsa-sha2-nistp384')
+
+# Default (secure) key types.  Additional types can be enabled via admin settings.
+_DEFAULT_USER_KEY_TYPES = ('ecdsa-sha2-nistp521', 'ssh-ed25519', 'ecdsa-sha2-nistp384')
+
+# All types the UI can offer as opt-in choices.
+ALL_USER_KEY_TYPE_OPTIONS = [
+    # (identifier,           display_label,                      secure_default)
+    ('ecdsa-sha2-nistp521',  'ECDSA P-521 (recommended)',        True),
+    ('ssh-ed25519',          'Ed25519 (recommended)',             True),
+    ('ecdsa-sha2-nistp384',  'ECDSA P-384',                      True),
+    ('ecdsa-sha2-nistp256',  'ECDSA P-256 (less secure)',         False),
+    ('rsa-sha2-512',         'RSA 4096 / SHA-512',               False),
+    ('rsa-sha2-256',         'RSA 2048–4096 / SHA-256',          False),
+    ('ssh-rsa',              'RSA legacy (SHA-1, not recommended)', False),
+]
+
 ENROLLMENT_TOKEN_TTL_HOURS = 24
 CHALLENGE_TTL_MINUTES = 30
 SSHSIG_NAMESPACE = 'sshadmin'
@@ -57,6 +72,7 @@ class Host(db.Model):
     id = db.Column(db.Integer, primary_key=True)
     hostname = db.Column(db.String(255), unique=True, nullable=False)
     description = db.Column(db.Text)
+    host_type = db.Column(db.String(20), nullable=False, default='linux')  # 'linux' or 'windows'
     host_key_id = db.Column(db.Integer, db.ForeignKey('ssh_key.id'), nullable=True)
     created_at = db.Column(db.DateTime, default=datetime.utcnow)
     created_by_id = db.Column(db.Integer, db.ForeignKey('user.id'), nullable=False)
@@ -90,6 +106,12 @@ class Host(db.Model):
         self.enrollment_expires_at = datetime.utcnow() + timedelta(hours=ENROLLMENT_TOKEN_TTL_HOURS)
         self.enrolled_at = None
         self.host_key_id = None
+
+    @property
+    def active_cert(self):
+        if self.host_key_id is None:
+            return None
+        return _latest_valid_cert_for_key(self.host_key_id)
 
 
 class HostUsers(db.Model):
@@ -161,6 +183,10 @@ class UserCredential(db.Model):
     def role(self):
         return self.host_user.role
 
+    @property
+    def active_cert(self):
+        return _latest_valid_cert_for_key(self.user_key_id)
+
 
 class Certificate(db.Model):
     """Issued SSH certificate (user or host); cert_type derived from ssh_key.key_type."""
@@ -227,6 +253,13 @@ class Challenge(db.Model):
         return self.consumed_at is None and self.expires_at > datetime.utcnow()
 
 
+class SiteConfig(db.Model):
+    """Persistent key-value store for admin-configurable site settings."""
+    __tablename__ = 'site_config'
+    key   = db.Column(db.String(64), primary_key=True)
+    value = db.Column(db.Text, nullable=False, default='')
+
+
 # ==================== Login Manager ====================
 
 @login_manager.user_loader
@@ -238,6 +271,20 @@ def load_user(user_id):
 
 
 # ==================== Helpers ====================
+
+def get_allowed_user_key_types() -> tuple:
+    """Return the tuple of currently-allowed SSH user key type identifiers.
+
+    Reads from SiteConfig; falls back to the secure defaults if not configured.
+    """
+    try:
+        cfg = db.session.get(SiteConfig, 'allowed_user_key_types')
+        if cfg and cfg.value.strip():
+            return tuple(t.strip() for t in cfg.value.split(',') if t.strip())
+    except Exception:
+        pass
+    return _DEFAULT_USER_KEY_TYPES
+
 
 def _pubkey_hash(pubkey: str) -> str:
     """SHA-256 fingerprint of an SSH public key (matches ssh-keygen -l -E sha256 format)."""
@@ -467,7 +514,7 @@ _CA_SETUP_ALLOWED_ENDPOINTS = {
     'api_ca_status', 'api_ca_pubkey',
     'api_auth_script', 'api_auth_status', 'api_challenge_response',
     'api_totp_response',
-    'api_enroll_script', 'api_enroll_host',
+    'api_enroll_script', 'api_enroll_ps1_script', 'api_enroll_host',
     'api_cert_install_data', 'api_cert_install_script',
     'api_cert_user', 'api_cert_host',
     'download_sshadmin_add',
@@ -490,6 +537,23 @@ def _redirect_admin_to_setup_when_ca_missing():
 @app.context_processor
 def inject_version():
     return {'app_version': __version__}
+
+
+@app.template_filter('reltime')
+def reltime_filter(dt):
+    """Render a future datetime as a human-readable relative duration (e.g. '3h', '45d', '1.2y')."""
+    if dt is None:
+        return '—'
+    secs = (dt - datetime.utcnow()).total_seconds()
+    if secs < 0:
+        return 'expired'
+    if secs < 3600:
+        return f'{int(secs / 60)}m'
+    if secs < 86400:
+        return f'{int(secs / 3600)}h'
+    if secs < 365.25 * 86400:
+        return f'{int(secs / 86400)}d'
+    return f'{secs / (365.25 * 86400):.1f}y'
 
 
 @app.route('/')
@@ -636,10 +700,11 @@ def register():
             flash('Account name, Unix username, and SSH public key are all required.', 'danger')
             return redirect(url_for('register'))
 
+        allowed = get_allowed_user_key_types()
         parts = public_key.split()
-        if len(parts) < 2 or parts[0] not in ALLOWED_USER_KEY_TYPES:
+        if len(parts) < 2 or parts[0] not in allowed:
             flash(
-                f'Public key must be one of: {", ".join(ALLOWED_USER_KEY_TYPES)}.',
+                f'Public key must be one of: {", ".join(allowed)}.',
                 'danger',
             )
             return redirect(url_for('register'))
@@ -663,7 +728,12 @@ def register():
         session['pending_challenge_token'] = challenge.token
         return redirect(url_for('auth_await', token=challenge.token))
 
-    return render_template('register.html', allowed_key_types=ALLOWED_USER_KEY_TYPES)
+    allowed = get_allowed_user_key_types()
+    ssh_port = app.config.get('SSHADMIN_SSH_PORT', os.environ.get('SSHADMIN_SSH_PORT', '2222'))
+    ssh_host = request.host.split(':')[0]
+    return render_template('register.html', allowed_key_types=allowed,
+                           all_key_type_options=ALL_USER_KEY_TYPE_OPTIONS,
+                           ssh_port=ssh_port, sshadmin_host=ssh_host)
 
 
 @app.route('/login', methods=['GET', 'POST'])
@@ -781,8 +851,11 @@ def add_host():
             flash(f'Host {hostname} already pending; new token issued.', 'info')
             return redirect(url_for('enroll_host', host_id=existing.id))
 
+        host_type = request.form.get('host_type', 'linux')
+        if host_type not in ('linux', 'windows'):
+            host_type = 'linux'
         host = Host(hostname=hostname, description=description,
-                    created_by_id=current_user.id)
+                    host_type=host_type, created_by_id=current_user.id)
         host.issue_enrollment_token()
         db.session.add(host)
         db.session.flush()
@@ -927,11 +1000,22 @@ def enroll_host(host_id):
         server_url=server_url, token=host.enrollment_token,
         hostname=host.hostname, key_type=ALLOWED_HOST_KEY_TYPE,
     )
+    ps1_script = render_template(
+        'enrollment_script.ps1',
+        server_url=server_url, token=host.enrollment_token,
+        hostname=host.hostname, expires_hours=ENROLLMENT_TOKEN_TTL_HOURS,
+    )
     one_liner_url = (f"{server_url}{url_for('api_enroll_script')}"
                      f"?token={host.enrollment_token}&host_id={host.id}")
+    ps1_url = (f"{server_url}{url_for('api_enroll_ps1_script')}"
+               f"?token={host.enrollment_token}&host_id={host.id}")
     return render_template(
-        'enroll_host.html', host=host, script=script,
+        'enroll_host.html', host=host, script=script, ps1_script=ps1_script,
         one_liner=f'curl -fsSL "{one_liner_url}" | sudo bash',
+        ps1_one_liner=(
+            f'Invoke-Expression (Invoke-WebRequest -Uri "{ps1_url}" '
+            f'-UseBasicParsing).Content'
+        ),
         expires_at=host.enrollment_expires_at,
     )
 
@@ -1006,9 +1090,10 @@ def add_credential():
             flash('Host, Unix username, and public key are required.', 'danger')
             return redirect(url_for('add_credential'))
 
+        allowed = get_allowed_user_key_types()
         key_parts = public_key.split()
-        if len(key_parts) < 2 or key_parts[0] not in ALLOWED_USER_KEY_TYPES:
-            flash(f'Key type must be one of: {", ".join(ALLOWED_USER_KEY_TYPES)}', 'danger')
+        if len(key_parts) < 2 or key_parts[0] not in allowed:
+            flash(f'Key type must be one of: {", ".join(allowed)}', 'danger')
             return redirect(url_for('add_credential'))
 
         host = Host.query.get_or_404(host_id)
@@ -1041,7 +1126,7 @@ def add_credential():
         return redirect(url_for('credentials'))
 
     return render_template('add_credential.html', hosts=enrolled_hosts,
-                           allowed_key_types=ALLOWED_USER_KEY_TYPES)
+                           allowed_key_types=get_allowed_user_key_types())
 
 
 @app.route('/credentials/<int:cred_id>/delete', methods=['POST'])
@@ -1055,6 +1140,73 @@ def delete_credential(cred_id):
     db.session.commit()
     flash('SSH User Key deleted.', 'info')
     return redirect(url_for('credentials'))
+
+
+@app.route('/hosts/batch_renew', methods=['POST'])
+@login_required
+def batch_renew_hosts():
+    """Issue new host certificates for a selected set of enrolled hosts."""
+    if not os.path.exists(cert_gen.ca_key):
+        flash('CA is not configured — cannot issue certificates.', 'danger')
+        return redirect(url_for('hosts'))
+    host_ids = request.form.getlist('host_ids', type=int)
+    if not host_ids:
+        flash('No hosts selected.', 'warning')
+        return redirect(url_for('hosts'))
+    ok, skipped = 0, 0
+    for host_id in host_ids:
+        host = Host.query.get(host_id)
+        if not host or not host.is_enrolled:
+            skipped += 1
+            continue
+        if not (current_user.is_admin or _can_admin_host(host)):
+            skipped += 1
+            continue
+        try:
+            _do_issue_host_cert(host, current_user.id)
+            ok += 1
+        except Exception:
+            skipped += 1
+    db.session.commit()
+    if ok:
+        flash(f'{ok} host certificate(s) issued.', 'success')
+    if skipped:
+        flash(f'{skipped} host(s) skipped (not enrolled, no access, or CA error).', 'warning')
+    return redirect(url_for('certificates'))
+
+
+@app.route('/credentials/batch_renew', methods=['POST'])
+@login_required
+def batch_renew_credentials():
+    """Issue new user certificates for a selected set of credentials."""
+    if not os.path.exists(cert_gen.ca_key):
+        flash('CA is not configured — cannot issue certificates.', 'danger')
+        return redirect(url_for('credentials'))
+    cred_ids = request.form.getlist('cred_ids', type=int)
+    if not cred_ids:
+        flash('No credentials selected.', 'warning')
+        return redirect(url_for('credentials'))
+    ok, skipped = 0, 0
+    for cred_id in cred_ids:
+        cred = UserCredential.query.get(cred_id)
+        if not cred:
+            skipped += 1
+            continue
+        if not (current_user.is_admin or cred.user_id == current_user.id
+                or _can_admin_host(cred.host)):
+            skipped += 1
+            continue
+        try:
+            _do_issue_user_cert(cred, current_user.id)
+            ok += 1
+        except Exception:
+            skipped += 1
+    db.session.commit()
+    if ok:
+        flash(f'{ok} user certificate(s) issued.', 'success')
+    if skipped:
+        flash(f'{skipped} credential(s) skipped (no access or CA error).', 'warning')
+    return redirect(url_for('certificates'))
 
 
 # ==================== Certificate routes ====================
@@ -1566,6 +1718,37 @@ def api_enroll_script():
     return (script, 200, {'Content-Type': 'text/x-shellscript; charset=utf-8'})
 
 
+@app.route('/api/enroll/script.ps1')
+def api_enroll_ps1_script():
+    token = (request.args.get('token') or '').strip()
+    host_id_raw = (request.args.get('host_id') or '').strip()
+    if not token:
+        return ('# enrollment token required\n', 403, {'Content-Type': 'text/plain'})
+    host = Host.query.filter_by(enrollment_token=token).first()
+    if not host:
+        return ('# invalid enrollment token\n', 403, {'Content-Type': 'text/plain'})
+    if host_id_raw:
+        try:
+            if int(host_id_raw) != host.id:
+                return ('# token/host_id mismatch\n', 403, {'Content-Type': 'text/plain'})
+        except ValueError:
+            return ('# invalid host_id\n', 400, {'Content-Type': 'text/plain'})
+    if host.enrolled_at is not None:
+        return ('# token already used\n', 409, {'Content-Type': 'text/plain'})
+    if host.enrollment_expires_at is None or host.enrollment_expires_at < datetime.utcnow():
+        return ('# token expired\n', 403, {'Content-Type': 'text/plain'})
+    server_url = request.url_root.rstrip('/')
+    script = render_template(
+        'enrollment_script.ps1',
+        server_url=server_url, token=host.enrollment_token,
+        hostname=host.hostname, expires_hours=ENROLLMENT_TOKEN_TTL_HOURS,
+    )
+    return (script, 200, {
+        'Content-Type': 'text/plain; charset=utf-8',
+        'Content-Disposition': f'inline; filename="enroll-{host.hostname}.ps1"',
+    })
+
+
 @app.route('/api/ca-pubkey')
 def api_ca_pubkey():
     if not os.path.exists(cert_gen.ca_pubkey):
@@ -1688,11 +1871,12 @@ def _ssh_add_machine(requester_user_id: int, data: dict) -> dict:
         if not host_key.startswith(ALLOWED_HOST_KEY_TYPE + ' '):
             return {'ok': False, 'error': f'host key must be {ALLOWED_HOST_KEY_TYPE}'}
 
+        allowed_user_types = get_allowed_user_key_types()
         user_key_type = (user_key.split() or [''])[0]
-        if user_key_type not in ALLOWED_USER_KEY_TYPES:
+        if user_key_type not in allowed_user_types:
             return {'ok': False,
                     'error': f'user key type {user_key_type!r} not allowed; '
-                             f'accepted: {", ".join(ALLOWED_USER_KEY_TYPES)}'}
+                             f'accepted: {", ".join(allowed_user_types)}'}
 
         # ── Host SSH key ──────────────────────────────────────────────────────
         host_ssh_key = _get_or_create_ssh_key(host_key, 'host')
@@ -1804,6 +1988,128 @@ def _ssh_get_cert(subject: str):
     return None
 
 
+def _ssh_renew_user_cert(requester_user_id: int, data: dict) -> dict:
+    """Renew a user certificate.
+
+    data keys:
+      user       — unix username on the remote machine
+      user_key   — SSH public key string
+      valid_days — (optional) integer
+    """
+    with app.app_context():
+        unix_username = (data.get('user') or '').strip()
+        public_key = (data.get('user_key') or '').strip()
+        valid_days = int(data.get('valid_days') or 365)
+
+        if not unix_username or not public_key:
+            return {'ok': False, 'error': 'user and user_key are required'}
+
+        user_ssh_key = _get_or_create_ssh_key(public_key, 'user')
+        db.session.flush()
+
+        cred = UserCredential.query.filter_by(
+            user_key_id=user_ssh_key.id, user_id=requester_user_id).first()
+        if not cred:
+            return {'ok': False, 'error': 'No matching credential found for this key and user'}
+
+        if not cert_gen.check_ca_keys():
+            return {'ok': False, 'error': 'CA not configured'}
+
+        try:
+            cert_data = _do_issue_user_cert(cred, requester_user_id, valid_days=valid_days)
+            db.session.commit()
+        except Exception as exc:
+            db.session.rollback()
+            return {'ok': False, 'error': str(exc)}
+
+        ca_pubkey = None
+        try:
+            with open(cert_gen.ca_pub, 'r') as f:
+                ca_pubkey = f.read().strip()
+        except Exception:
+            pass
+
+        return {'ok': True, 'user_cert': cert_data, 'ca_pubkey': ca_pubkey}
+
+
+def _ssh_renew_host_cert(requester_user_id: int, data: dict) -> dict:
+    """Renew a host certificate.
+
+    data keys:
+      hostname   — FQDN of the host
+      host_key   — SSH public key string
+      valid_days — (optional) integer
+
+    The requester must be an owner of the host.
+    """
+    with app.app_context():
+        hostname = (data.get('hostname') or '').strip()
+        public_key = (data.get('host_key') or '').strip()
+        valid_days = int(data.get('valid_days') or 365)
+
+        if not hostname or not public_key:
+            return {'ok': False, 'error': 'hostname and host_key are required'}
+
+        host = Host.query.filter_by(hostname=hostname).first()
+        if not host or not host.is_enrolled:
+            return {'ok': False, 'error': f'Host {hostname!r} not found or not enrolled'}
+
+        hu = HostUsers.query.filter_by(host_id=host.id, user_id=requester_user_id).first()
+        if not hu:
+            return {'ok': False, 'error': 'You are not an owner of this host'}
+
+        # Verify the supplied key matches the enrolled key
+        supplied_parts = public_key.split()[:2]
+        enrolled_parts = (host.public_key or '').split()[:2]
+        if supplied_parts != enrolled_parts:
+            return {'ok': False, 'error': 'Supplied host key does not match the enrolled key'}
+
+        if not cert_gen.check_ca_keys():
+            return {'ok': False, 'error': 'CA not configured'}
+
+        try:
+            cert_data = _do_issue_host_cert(host, requester_user_id, valid_days=valid_days)
+            db.session.commit()
+        except Exception as exc:
+            db.session.rollback()
+            return {'ok': False, 'error': str(exc)}
+
+        ca_pubkey = None
+        try:
+            with open(cert_gen.ca_pub, 'r') as f:
+                ca_pubkey = f.read().strip()
+        except Exception:
+            pass
+
+        return {'ok': True, 'host_cert': cert_data, 'ca_pubkey': ca_pubkey}
+
+
+# ==================== Admin Settings ====================
+
+@app.route('/admin/settings', methods=['GET', 'POST'])
+@admin_required
+def admin_settings():
+    if request.method == 'POST':
+        chosen = request.form.getlist('user_key_types')
+        valid_ids = {t[0] for t in ALL_USER_KEY_TYPE_OPTIONS}
+        chosen = [t for t in chosen if t in valid_ids]
+        if not chosen:
+            chosen = list(_DEFAULT_USER_KEY_TYPES)
+        cfg = db.session.get(SiteConfig, 'allowed_user_key_types')
+        if cfg:
+            cfg.value = ','.join(chosen)
+        else:
+            db.session.add(SiteConfig(key='allowed_user_key_types', value=','.join(chosen)))
+        db.session.commit()
+        flash('Settings saved.', 'success')
+        return redirect(url_for('admin_settings'))
+
+    current_types = set(get_allowed_user_key_types())
+    return render_template('admin_settings.html',
+                           all_key_type_options=ALL_USER_KEY_TYPE_OPTIONS,
+                           current_types=current_types)
+
+
 # ==================== Error handlers ====================
 
 @app.errorhandler(404)
@@ -1847,6 +2153,8 @@ def _start_ssh_auth_server_if_enabled():
                 'finalize_challenge': _finalize_consumed_challenge,
                 'get_cert': _ssh_get_cert,
                 'add_machine': _ssh_add_machine,
+                'renew_user_cert': _ssh_renew_user_cert,
+                'renew_host_cert': _ssh_renew_host_cert,
             },
             host=bind, port=port,
             ca_key_path=cert_gen.ca_key if cert_gen.check_ca_keys() else None,

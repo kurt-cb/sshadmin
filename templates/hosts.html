@@ -24,12 +24,24 @@
 <div class="card">
     <div class="card-body">
         {% if hosts %}
+        <form method="POST" action="{{ url_for('batch_renew_hosts') }}" id="hosts-form">
+        <div class="d-flex justify-content-between align-items-center mb-2">
+            <div>
+                <input class="form-check-input me-1" type="checkbox" id="check-all-hosts">
+                <label class="form-check-label small text-muted" for="check-all-hosts">Select all</label>
+            </div>
+            <button type="submit" class="btn btn-sm btn-outline-success" id="renew-hosts-btn" disabled>
+                <i class="bi bi-arrow-repeat"></i> Renew Selected Certs
+            </button>
+        </div>
         <div class="table-responsive">
             <table class="table table-hover">
                 <thead>
                     <tr>
+                        <th style="width:2rem"></th>
                         <th>Hostname</th>
                         <th>Status</th>
+                        <th>Cert Expires</th>
                         <th>Description</th>
                         {% if viewing_as_admin %}<th>Owners</th>{% endif %}
                         <th>Added By</th>
@@ -40,6 +52,12 @@
                 <tbody>
                     {% for host in hosts %}
                     <tr>
+                        <td>
+                            {% if host.is_enrolled %}
+                            <input class="form-check-input host-check" type="checkbox"
+                                   name="host_ids" value="{{ host.id }}">
+                            {% endif %}
+                        </td>
                         <td>
                             <strong>
                                 {% if host.is_enrolled %}
@@ -54,6 +72,20 @@
                                 <span class="badge bg-success">Enrolled</span>
                             {% else %}
                                 <span class="badge bg-warning text-dark">Pending</span>
+                            {% endif %}
+                        </td>
+                        <td>
+                            {% if host.is_enrolled %}
+                                {% set cert = host.active_cert %}
+                                {% if cert %}
+                                    <span class="badge bg-info text-dark" title="{{ cert.valid_until.strftime('%Y-%m-%d %H:%M UTC') }}">
+                                        {{ cert.valid_until | reltime }}
+                                    </span>
+                                {% else %}
+                                    <span class="text-muted small">none</span>
+                                {% endif %}
+                            {% else %}
+                                <span class="text-muted">—</span>
                             {% endif %}
                         </td>
                         <td>
@@ -93,6 +125,7 @@
                 </tbody>
             </table>
         </div>
+        </form>
         {% else %}
         <div class="alert alert-info" role="alert">
             <i class="bi bi-info-circle"></i> No hosts registered yet. <a href="/hosts/add">Add one now</a>
@@ -100,4 +133,34 @@
         {% endif %}
     </div>
 </div>
+{% endblock %}
+
+{% block extra_js %}
+<script>
+(function () {
+    var checkAll = document.getElementById('check-all-hosts');
+    var renewBtn = document.getElementById('renew-hosts-btn');
+    if (!checkAll) return;
+
+    function updateBtn() {
+        var checked = document.querySelectorAll('.host-check:checked').length;
+        renewBtn.disabled = checked === 0;
+    }
+
+    checkAll.addEventListener('change', function () {
+        document.querySelectorAll('.host-check').forEach(function (cb) {
+            cb.checked = checkAll.checked;
+        });
+        updateBtn();
+    });
+
+    document.querySelectorAll('.host-check').forEach(function (cb) {
+        cb.addEventListener('change', function () {
+            checkAll.checked = document.querySelectorAll('.host-check').length ===
+                               document.querySelectorAll('.host-check:checked').length;
+            updateBtn();
+        });
+    });
+})();
+</script>
 {% endblock %}

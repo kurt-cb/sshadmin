@@ -154,6 +154,11 @@
                             <i class="bi bi-gear"></i> Server Config
                         </a>
                     </li>
+                    <li class="nav-item">
+                        <a class="nav-link {% if request.endpoint == 'admin_settings' %}active{% endif %}" href="{{ url_for('admin_settings') }}">
+                            <i class="bi bi-sliders"></i> Admin Settings
+                        </a>
+                    </li>
                     {% endif %}
                 </ul>
                 {% endif %}

@@ -1,0 +1,70 @@
+{% extends "base.html" %}
+
+{% block title %}Admin Settings - SSH Certificate Admin{% endblock %}
+
+{% block content %}
+<h1 class="mb-4">Admin Settings</h1>
+
+<form method="POST">
+  <div class="card mb-4">
+    <div class="card-header">
+      Allowed SSH User Key Types
+    </div>
+    <div class="card-body">
+      <p class="text-muted small mb-3">
+        Key types checked here are accepted during registration and credential creation.
+        Unchecking a type does <strong>not</strong> invalidate existing keys — it only
+        prevents new keys of that type from being registered. The three default types
+        (P-521, Ed25519, P-384) are the most secure choices; enabling legacy types is
+        only recommended for compatibility with older clients.
+      </p>
+
+      <table class="table table-sm table-borderless mb-0">
+        <thead class="table-light">
+          <tr>
+            <th style="width:2rem"></th>
+            <th>Key Type</th>
+            <th>Identifier</th>
+            <th>Security</th>
+          </tr>
+        </thead>
+        <tbody>
+          {% for (id, label, secure) in all_key_type_options %}
+          <tr>
+            <td>
+              <input class="form-check-input" type="checkbox"
+                     name="user_key_types" id="kt_{{ loop.index }}"
+                     value="{{ id }}"
+                     {% if id in current_types %}checked{% endif %}>
+            </td>
+            <td>
+              <label class="form-check-label mb-0" for="kt_{{ loop.index }}">{{ label }}</label>
+            </td>
+            <td><code class="small">{{ id }}</code></td>
+            <td>
+              {% if secure %}
+                <span class="badge bg-success">Default / secure</span>
+              {% else %}
+                <span class="badge bg-warning text-dark">Legacy / less secure</span>
+              {% endif %}
+            </td>
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+
+      <div class="alert alert-warning small mt-3 mb-0">
+        <i class="bi bi-exclamation-triangle"></i>
+        At least one type must remain enabled. Saving with none selected resets to defaults.
+      </div>
+    </div>
+  </div>
+
+  <div class="d-flex gap-2">
+    <button type="submit" class="btn btn-primary">
+      <i class="bi bi-check-circle"></i> Save Settings
+    </button>
+    <a href="{{ url_for('server_config') }}" class="btn btn-secondary">Cancel</a>
+  </div>
+</form>
+{% endblock %}
