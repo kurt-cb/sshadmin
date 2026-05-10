@@ -1,0 +1,121 @@
+{% extends "base.html" %}
+{% block title %}Security Model - SSH Certificate Admin{% endblock %}
+
+{% block content %}
+<nav aria-label="breadcrumb" class="mb-3">
+  <ol class="breadcrumb">
+    <li class="breadcrumb-item"><a href="{{ url_for('help_index') }}">Help</a></li>
+    <li class="breadcrumb-item active">Security Model</li>
+  </ol>
+</nav>
+
+<h1 class="mb-4"><i class="bi bi-shield-check"></i> Security Model</h1>
+
+<div class="card mb-4">
+  <div class="card-header">Trust Boundaries</div>
+  <div class="card-body">
+    <p>sshadmin's security rests on three independently-protected secrets:</p>
+    <ol>
+      <li><strong>The Host CA private key</strong> — signs host certificates. If compromised, an attacker
+      could impersonate any enrolled host to clients that trust the CA. Stored on the sshadmin server only.</li>
+      <li><strong>The User CA private key(s)</strong> — sign user certificates. If compromised, an attacker
+      could forge certs granting access to any machine that trusts the CA.
+      In multi-group mode, each group has its own CA key — a compromise affects only that group's machines.</li>
+      <li><strong>Each host's private SSH key</strong> — proves the host's identity. Cannot be extracted
+      from the machine without root access. Host certs are bound to this key.</li>
+    </ol>
+    <div class="alert alert-danger small mb-0">
+      <i class="bi bi-exclamation-octagon"></i>
+      <strong>CA key compromise is critical.</strong> Protect the sshadmin server with the same care
+      as your most sensitive machine. Use full-disk encryption, restrict network access, and monitor logins.
+    </div>
+  </div>
+</div>
+
+<div class="card mb-4">
+  <div class="card-header">What sshadmin Enforces</div>
+  <div class="card-body">
+    <ul>
+      <li><strong>Host authentication</strong> — clients verify the host cert against the CA;
+      no more "accept unknown fingerprint?" prompts. A rogue machine cannot impersonate an enrolled one.</li>
+      <li><strong>User authentication</strong> — servers verify the user cert against the (group) CA;
+      only cert holders can log in to accounts listed in the cert's principals.</li>
+      <li><strong>Principal restrictions</strong> — <code>root</code> is never a valid principal.
+      Users can only be signed for unix accounts explicitly authorised by the host owner.</li>
+      <li><strong>Cert expiry</strong> — expired certs are rejected with no server-side action required.
+      Short-lived certs are the primary revocation mechanism.</li>
+      <li><strong>Group isolation</strong> (multi-group mode) — a cert signed by Group A's CA is
+      cryptographically rejected by machines that only trust Group B's CA. This is enforced by
+      OpenSSH, not by policy rules that could be misconfigured.</li>
+    </ul>
+  </div>
+</div>
+
+<div class="card mb-4">
+  <div class="card-header">What sshadmin Does NOT Protect Against</div>
+  <div class="card-body">
+    <ul>
+      <li><strong>Compromise of the sshadmin server itself</strong> — the CA keys are on this machine.
+      Treat it as a high-value target.</li>
+      <li><strong>A user copying their private key to another machine</strong> — the cert follows
+      whoever holds the private key. Passphrase-protect user keys to reduce risk.</li>
+      <li><strong>Root on an enrolled machine</strong> — a user who gains root can read
+      <code>/etc/ssh/sshd_config</code>, modify <code>TrustedUserCAKeys</code>, or add entries to
+      <code>/root/.ssh/authorized_keys</code>. This is a property of SSH itself, not of sshadmin.</li>
+      <li><strong>The "default" group in simple mode</strong> — everyone is in it. If multi-group
+      isolation is needed, enable multi-group mode and assign machines to appropriate groups.</li>
+    </ul>
+  </div>
+</div>
+
+<div class="card mb-4">
+  <div class="card-header">User Cert Issuance — Who Controls What</div>
+  <div class="card-body">
+    <p>A key design goal is that users cannot obtain certificates granting access to accounts
+    the machine owner did not authorise:</p>
+    <ul>
+      <li><strong>Simple mode:</strong> The unix account name in the cert matches the username
+      provided during enrollment. Users do not choose their own principals.</li>
+      <li><strong>Multi-group mode:</strong> Group owners set the allowed unix accounts per user
+      at approval time (the <em>unix principals</em> field). Users can request what they need,
+      but cannot override the group owner's decision.</li>
+      <li><strong>Root is blocked server-side</strong> — the cert issuance code refuses to sign
+      a cert with <code>root</code> as a principal regardless of what is requested.</li>
+    </ul>
+    <p class="mb-0">Machine owners control which CA groups their machine trusts. This means
+    they decide which sets of users can reach their machine, without needing to manage individual
+    key entries.</p>
+  </div>
+</div>
+
+<div class="card mb-4">
+  <div class="card-header">Host Principal Mode (Strict vs. Wildcard)</div>
+  <div class="card-body">
+    <p>Host certificates can be issued in two modes, configurable in Admin Settings:</p>
+    <div class="row g-3">
+      <div class="col-md-6">
+        <h6>Wildcard (default)</h6>
+        <p class="small">No <code>-n</code> flag — the cert is valid for any hostname.
+        Security relies entirely on the CA key and the host's private key remaining protected.
+        Clients accept the host as long as the cert is CA-signed and unexpired.</p>
+      </div>
+      <div class="col-md-6">
+        <h6>Strict mode</h6>
+        <p class="small">The cert lists all registered hostnames and IP aliases as principals.
+        A client connecting via a name not in the list sees "Certificate invalid: name is not a listed principal."
+        Use <code>sshadmin alias</code> to register additional names.</p>
+      </div>
+    </div>
+    <p class="small text-muted mt-2 mb-0">
+      Note: <code>StrictHostKeyChecking yes</code> is written into the client's
+      <code>~/.ssh/config</code> by the enrollment script, so cert failures hard-fail
+      rather than falling back to a raw key prompt.
+    </p>
+  </div>
+</div>
+
+<div class="d-flex gap-2 mt-4">
+  <a href="{{ url_for('help_key_concepts') }}" class="btn btn-outline-secondary">← Key Concepts</a>
+  <a href="{{ url_for('help_groups') }}" class="btn btn-outline-primary">CA Groups →</a>
+</div>
+{% endblock %}

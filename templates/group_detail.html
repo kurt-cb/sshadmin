@@ -1,0 +1,236 @@
+{% extends "base.html" %}
+{% block title %}Group: {{ group.name }} - SSH Certificate Admin{% endblock %}
+
+{% block content %}
+<div class="d-flex justify-content-between align-items-center mb-4">
+  <div>
+    <h1 class="mb-0">
+      <i class="bi bi-diagram-3"></i> {{ group.name }}
+      {% if group.is_default %}<span class="badge bg-warning text-dark ms-2 fs-6">Default</span>{% endif %}
+    </h1>
+    {% if group.description %}<p class="text-muted mb-0">{{ group.description }}</p>{% endif %}
+  </div>
+  <a href="{{ url_for('groups') }}" class="btn btn-outline-secondary btn-sm">
+    <i class="bi bi-arrow-left"></i> All Groups
+  </a>
+</div>
+
+<div class="row g-3 mb-4">
+  <div class="col-sm-3">
+    <div class="card text-center">
+      <div class="card-body py-3">
+        <div class="fs-2 fw-bold text-primary">{{ group.active_user_count }}</div>
+        <div class="small text-muted">Active Users</div>
+      </div>
+    </div>
+  </div>
+  <div class="col-sm-3">
+    <div class="card text-center">
+      <div class="card-body py-3">
+        <div class="fs-2 fw-bold text-success">{{ group.active_host_count }}</div>
+        <div class="small text-muted">Hosts</div>
+      </div>
+    </div>
+  </div>
+  <div class="col-sm-3">
+    <div class="card text-center">
+      <div class="card-body py-3">
+        <div class="fs-2 fw-bold {{ 'text-warning' if group.pending_user_count > 0 else 'text-muted' }}">
+          {{ group.pending_user_count }}
+        </div>
+        <div class="small text-muted">Pending Requests</div>
+      </div>
+    </div>
+  </div>
+  <div class="col-sm-3">
+    <div class="card text-center">
+      <div class="card-body py-3">
+        <div class="small text-muted mb-1">CA Public Key</div>
+        {% if group.ca_pubkey_data %}
+          <code class="small" style="word-break:break-all;font-size:.65rem;">
+            {{ group.ca_pubkey_data[:40] }}…
+          </code>
+        {% else %}
+          <span class="text-danger small">Missing!</span>
+        {% endif %}
+      </div>
+    </div>
+  </div>
+</div>
+
+{% if not my_membership or my_membership.status != 'active' %}
+{% if multi_group_enabled and not group.is_default %}
+<div class="card mb-4">
+  <div class="card-header">Request Access</div>
+  <div class="card-body">
+    <form method="POST" action="{{ url_for('group_request_access', group_id=group.id) }}" class="row g-2 align-items-end">
+      <div class="col-md-6">
+        <label class="form-label small">Unix accounts (comma-separated, e.g. <code>alice,deploy</code>)</label>
+        <input type="text" name="unix_principals" class="form-control form-control-sm"
+               placeholder="Leave blank to use your sshadmin username">
+      </div>
+      <div class="col-auto">
+        <button type="submit" class="btn btn-success btn-sm">
+          <i class="bi bi-box-arrow-in-right"></i> Request Access
+        </button>
+      </div>
+    </form>
+  </div>
+</div>
+{% endif %}
+{% endif %}
+
+<div class="row g-3">
+
+  <!-- ── Pending requests ──────────────────────────────── -->
+  {% if is_owner and group.pending_user_count > 0 %}
+  <div class="col-12">
+    <div class="card border-warning">
+      <div class="card-header bg-warning text-dark">
+        <i class="bi bi-clock"></i> Pending Access Requests ({{ group.pending_user_count }})
+      </div>
+      <div class="card-body p-0">
+        <table class="table table-sm mb-0">
+          <thead class="table-light">
+            <tr>
+              <th>User</th>
+              <th>Requested Unix Accounts</th>
+              <th>Requested</th>
+              <th>Actions</th>
+            </tr>
+          </thead>
+          <tbody>
+            {% for m in group.user_memberships if m.status == 'pending' %}
+            <tr>
+              <td><strong>{{ m.user.username }}</strong></td>
+              <td>
+                <form method="POST" action="{{ url_for('group_approve_user', group_id=group.id, membership_id=m.id) }}" class="d-flex gap-2">
+                  <input type="text" name="unix_principals" class="form-control form-control-sm"
+                         value="{{ m.unix_principals or m.user.username }}"
+                         style="max-width:200px">
+                  <button type="submit" class="btn btn-success btn-sm">
+                    <i class="bi bi-check-lg"></i> Approve
+                  </button>
+                </form>
+              </td>
+              <td class="text-muted small">{{ m.requested_at.strftime('%Y-%m-%d') }}</td>
+              <td>
+                <form method="POST" action="{{ url_for('group_reject_user', group_id=group.id, membership_id=m.id) }}">
+                  <button type="submit" class="btn btn-outline-danger btn-sm">
+                    <i class="bi bi-x-lg"></i> Reject
+                  </button>
+                </form>
+              </td>
+            </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  </div>
+  {% endif %}
+
+  <!-- ── Active members ────────────────────────────────── -->
+  <div class="col-md-6">
+    <div class="card">
+      <div class="card-header d-flex justify-content-between">
+        <span><i class="bi bi-people"></i> Users</span>
+        <span class="badge bg-primary">{{ group.active_user_count }}</span>
+      </div>
+      <div class="card-body p-0">
+        {% set active_members = group.user_memberships | selectattr('status', 'eq', 'active') | list %}
+        {% if active_members %}
+        <table class="table table-sm mb-0">
+          <thead class="table-light">
+            <tr><th>Username</th><th>Unix Accounts</th><th>Approved</th>{% if is_owner %}<th></th>{% endif %}</tr>
+          </thead>
+          <tbody>
+            {% for m in active_members | sort(attribute='user.username') %}
+            <tr>
+              <td>{{ m.user.username }}</td>
+              <td><code class="small">{{ m.unix_principals or m.user.username }}</code></td>
+              <td class="text-muted small">{{ m.approved_at.strftime('%Y-%m-%d') if m.approved_at else '—' }}</td>
+              {% if is_owner and (not group.is_default or current_user.is_admin) %}
+              <td>
+                <form method="POST" action="{{ url_for('group_remove_user', group_id=group.id, membership_id=m.id) }}"
+                      onsubmit="return confirm('Remove {{ m.user.username }} from this group?')">
+                  <button type="submit" class="btn btn-outline-danger btn-sm py-0">
+                    <i class="bi bi-x"></i>
+                  </button>
+                </form>
+              </td>
+              {% endif %}
+            </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+        {% else %}
+        <p class="text-muted small p-3 mb-0">No active members yet.</p>
+        {% endif %}
+      </div>
+    </div>
+  </div>
+
+  <!-- ── Hosts ─────────────────────────────────────────── -->
+  <div class="col-md-6">
+    <div class="card">
+      <div class="card-header d-flex justify-content-between">
+        <span><i class="bi bi-hdd-rack"></i> Hosts</span>
+        <span class="badge bg-success">{{ group.active_host_count }}</span>
+      </div>
+      <div class="card-body p-0">
+        {% set active_hosts = group.host_memberships | selectattr('status', 'eq', 'active') | list %}
+        {% if active_hosts %}
+        <table class="table table-sm mb-0">
+          <thead class="table-light">
+            <tr><th>Hostname</th><th>Added</th>{% if is_owner %}<th></th>{% endif %}</tr>
+          </thead>
+          <tbody>
+            {% for m in active_hosts | sort(attribute='host.hostname') %}
+            <tr>
+              <td>
+                <a href="{{ url_for('host_info', host_id=m.host.id) }}">{{ m.host.hostname }}</a>
+              </td>
+              <td class="text-muted small">{{ m.created_at.strftime('%Y-%m-%d') }}</td>
+              {% if is_owner and (not group.is_default or current_user.is_admin) %}
+              <td>
+                <form method="POST" action="{{ url_for('group_remove_host', group_id=group.id, membership_id=m.id) }}"
+                      onsubmit="return confirm('Remove {{ m.host.hostname }} from this group?')">
+                  <button type="submit" class="btn btn-outline-danger btn-sm py-0">
+                    <i class="bi bi-x"></i>
+                  </button>
+                </form>
+              </td>
+              {% endif %}
+            </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+        {% else %}
+        <p class="text-muted small p-3 mb-0">No hosts in this group yet.</p>
+        {% endif %}
+
+        {% if is_owner and multi_group_enabled %}
+        <div class="border-top p-3">
+          <form method="POST" action="{{ url_for('group_add_host', group_id=group.id) }}" class="d-flex gap-2">
+            <select name="host_id" class="form-select form-select-sm">
+              <option value="">— Add a host —</option>
+              {% for h in all_hosts if h.id not in enrolled_host_ids and h.is_enrolled %}
+              <option value="{{ h.id }}">{{ h.hostname }}</option>
+              {% endfor %}
+            </select>
+            <button type="submit" class="btn btn-success btn-sm text-nowrap">
+              <i class="bi bi-plus"></i> Add
+            </button>
+          </form>
+          <p class="text-muted small mt-2 mb-0">
+            After adding a host, re-enroll it to update its <code>TrustedUserCAKeys</code>.
+          </p>
+        </div>
+        {% endif %}
+      </div>
+    </div>
+  </div>
+
+</div>
+{% endblock %}

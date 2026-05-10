@@ -92,6 +92,39 @@
     </div>
   </div>
 
+  <div class="card mb-4">
+    <div class="card-header">
+      CA Group Mode
+    </div>
+    <div class="card-body">
+      <p class="text-muted small mb-3">
+        In <strong>simple mode</strong> (default) all users and hosts share a single User CA.
+        A valid cert works on every enrolled machine. Suitable for small teams where everyone
+        needs access to everything.
+      </p>
+      <p class="text-muted small mb-3">
+        In <strong>multi-group mode</strong> each CA group has its own CA keypair.
+        A cert from Group A is cryptographically rejected by machines that only trust Group B.
+        Use this to create isolated access zones (departments, environments, contractors).
+        See <a href="{{ url_for('help_groups') }}">CA Groups documentation</a> for details.
+      </p>
+      <div class="form-check mb-2">
+        <input class="form-check-input" type="checkbox" name="multi_group_enabled"
+               id="multi_group_enabled" value="1"
+               {% if multi_group_enabled %}checked{% endif %}>
+        <label class="form-check-label" for="multi_group_enabled">
+          <strong>Enable multi-group mode</strong> — allow multiple CA groups with isolated access zones
+        </label>
+      </div>
+      <div class="alert alert-warning small mt-3 mb-0">
+        <i class="bi bi-exclamation-triangle"></i>
+        Enabling multi-group mode makes the <strong>Groups</strong> nav item visible to all users.
+        Disabling it reverts to simple mode — existing groups and memberships are preserved but inactive.
+        Hosts must be re-enrolled after joining a new group to update their <code>TrustedUserCAKeys</code>.
+      </div>
+    </div>
+  </div>
+
   <div class="d-flex gap-2">
     <button type="submit" class="btn btn-primary">
       <i class="bi bi-check-circle"></i> Save Settings

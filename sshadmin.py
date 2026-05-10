@@ -1,7 +1,7 @@
 """
 SSH Certificate Admin - Web-based SSH certificate management system
 """
-__version__ = '0.0.8'
+__version__ = '0.0.9'
 from flask import Flask, render_template, request, jsonify, redirect, url_for, flash, session, Response
 from flask_sqlalchemy import SQLAlchemy
 from flask_login import LoginManager, UserMixin, login_user, logout_user, login_required, current_user
@@ -86,6 +86,8 @@ class Host(db.Model):
                                  cascade='all, delete-orphan')
     aliases = db.relationship('HostAlias', back_populates='host',
                               cascade='all, delete-orphan', order_by='HostAlias.created_at')
+    group_memberships = db.relationship('HostGroupMembership', back_populates='host',
+                                        cascade='all, delete-orphan')
 
     @property
     def is_enrolled(self):
@@ -162,6 +164,9 @@ class User(UserMixin, db.Model):
     credentials = db.relationship('UserCredential', back_populates='user',
                                   cascade='all, delete-orphan')
     host_roles = db.relationship('HostUsers', back_populates='user')
+    group_memberships = db.relationship('UserGroupMembership', back_populates='user',
+                                        foreign_keys='UserGroupMembership.user_id',
+                                        cascade='all, delete-orphan')
 
     @property
     def is_active(self):
@@ -271,6 +276,111 @@ class Challenge(db.Model):
         return self.consumed_at is None and self.expires_at > datetime.utcnow()
 
 
+class CAGroup(db.Model):
+    """A named CA group.  Machines in the group trust this group's CA for user certs.
+    In simple mode (multi_group_enabled=False) only the 'default' group exists and
+    all users/hosts belong to it automatically — behaviour is identical to pre-group
+    operation.  In multi-group mode each group has its own CA keypair so a user cert
+    from Group A is cryptographically rejected by a machine that only trusts Group B.
+    """
+    __tablename__ = 'ca_group'
+    id            = db.Column(db.Integer, primary_key=True)
+    name          = db.Column(db.String(80), unique=True, nullable=False)
+    description   = db.Column(db.Text, nullable=True)
+    # Path to the group's private CA key.  None → use the main site CA key.
+    ca_key_path   = db.Column(db.String(255), nullable=True)
+    created_at    = db.Column(db.DateTime, default=datetime.utcnow)
+    created_by_id = db.Column(db.Integer, db.ForeignKey('user.id'), nullable=True)
+
+    created_by      = db.relationship('User', foreign_keys=[created_by_id])
+    host_memberships = db.relationship('HostGroupMembership', back_populates='group',
+                                       cascade='all, delete-orphan')
+    user_memberships = db.relationship('UserGroupMembership', back_populates='group',
+                                       cascade='all, delete-orphan')
+
+    @property
+    def is_default(self):
+        return self.name == 'default'
+
+    @property
+    def effective_ca_key(self):
+        """Private key path used to sign certs for this group."""
+        return self.ca_key_path or os.environ.get('SSH_CA_KEY', '/etc/ssh/ca_key')
+
+    @property
+    def ca_pubkey_data(self):
+        pub = self.effective_ca_key + '.pub'
+        if os.path.exists(pub):
+            with open(pub) as f:
+                return f.read().strip()
+        return None
+
+    @property
+    def active_user_count(self):
+        return sum(1 for m in self.user_memberships if m.status == 'active')
+
+    @property
+    def active_host_count(self):
+        return sum(1 for m in self.host_memberships if m.status == 'active')
+
+    @property
+    def pending_user_count(self):
+        return sum(1 for m in self.user_memberships if m.status == 'pending')
+
+    @property
+    def pending_host_count(self):
+        return sum(1 for m in self.host_memberships if m.status == 'pending')
+
+
+class HostGroupMembership(db.Model):
+    """A host's participation in a CA group.
+    Active membership means the host's sshd TrustedUserCAKeys includes this group's CA.
+    """
+    __tablename__ = 'host_group_membership'
+    id            = db.Column(db.Integer, primary_key=True)
+    host_id       = db.Column(db.Integer, db.ForeignKey('host.id',     ondelete='CASCADE'), nullable=False)
+    group_id      = db.Column(db.Integer, db.ForeignKey('ca_group.id', ondelete='CASCADE'), nullable=False)
+    status        = db.Column(db.String(20), nullable=False, default='active')  # 'pending' | 'active'
+    created_at    = db.Column(db.DateTime, default=datetime.utcnow)
+    approved_by_id = db.Column(db.Integer, db.ForeignKey('user.id'), nullable=True)
+
+    __table_args__ = (db.UniqueConstraint('host_id', 'group_id', name='_host_group_uc'),)
+
+    host        = db.relationship('Host',    back_populates='group_memberships')
+    group       = db.relationship('CAGroup', back_populates='host_memberships')
+    approved_by = db.relationship('User',    foreign_keys=[approved_by_id])
+
+
+class UserGroupMembership(db.Model):
+    """A user's membership in a CA group, with an approval workflow.
+    When active, the user can obtain a cert signed by the group's CA, granting
+    access to all machines in that group (subject to unix_principals restrictions).
+    """
+    __tablename__ = 'user_group_membership'
+    id              = db.Column(db.Integer, primary_key=True)
+    user_id         = db.Column(db.Integer, db.ForeignKey('user.id',     ondelete='CASCADE'), nullable=False)
+    group_id        = db.Column(db.Integer, db.ForeignKey('ca_group.id', ondelete='CASCADE'), nullable=False)
+    status          = db.Column(db.String(20), nullable=False, default='pending')  # 'pending'|'active'|'rejected'
+    # Comma-separated unix account names this cert may be used for.
+    # Empty / None → use the sshadmin username only.
+    unix_principals = db.Column(db.Text, nullable=True)
+    requested_at    = db.Column(db.DateTime, default=datetime.utcnow)
+    approved_at     = db.Column(db.DateTime, nullable=True)
+    approved_by_id  = db.Column(db.Integer, db.ForeignKey('user.id'), nullable=True)
+
+    __table_args__ = (db.UniqueConstraint('user_id', 'group_id', name='_user_group_uc'),)
+
+    user        = db.relationship('User',    back_populates='group_memberships', foreign_keys=[user_id])
+    group       = db.relationship('CAGroup', back_populates='user_memberships')
+    approved_by = db.relationship('User',    foreign_keys=[approved_by_id])
+
+    @property
+    def principals_list(self):
+        if not self.unix_principals:
+            return [self.user.username]
+        return [p.strip() for p in self.unix_principals.split(',') if p.strip()]
+
+
 class SiteConfig(db.Model):
     """Persistent key-value store for admin-configurable site settings."""
     __tablename__ = 'site_config'
@@ -315,6 +425,100 @@ def get_strict_host_principals() -> bool:
         return cfg is not None and cfg.value == '1'
     except Exception:
         return False
+
+
+def get_multi_group_enabled() -> bool:
+    """Return True when multi-CA-group mode is enabled by the admin."""
+    try:
+        cfg = db.session.get(SiteConfig, 'multi_group_enabled')
+        return cfg is not None and cfg.value == '1'
+    except Exception:
+        return False
+
+
+def _ensure_default_group():
+    """Idempotently create the 'default' CA group and enrol all existing users/hosts."""
+    try:
+        with app.app_context():
+            existing = CAGroup.query.filter_by(name='default').first()
+            if not existing:
+                group = CAGroup(
+                    name='default',
+                    description=(
+                        'Default group — all users and hosts are members automatically. '
+                        'Certs are signed by the main site CA.'
+                    ),
+                )
+                db.session.add(group)
+                db.session.flush()
+
+            default_group = CAGroup.query.filter_by(name='default').first()
+            if default_group:
+                for u in User.query.filter(User.completed_at.isnot(None)).all():
+                    _ensure_user_in_group(u.id, default_group.id, auto_approve=True)
+                for h in Host.query.filter(Host.enrolled_at.isnot(None)).all():
+                    _ensure_host_in_group(h.id, default_group.id)
+                db.session.commit()
+    except Exception as exc:
+        app.logger.warning('_ensure_default_group: %s', exc)
+
+
+def _ensure_user_in_group(user_id: int, group_id: int, auto_approve: bool = False):
+    """Add user to group if not already a member; return the membership row."""
+    m = UserGroupMembership.query.filter_by(user_id=user_id, group_id=group_id).first()
+    if not m:
+        m = UserGroupMembership(
+            user_id=user_id, group_id=group_id,
+            status='active' if auto_approve else 'pending',
+            approved_at=datetime.utcnow() if auto_approve else None,
+        )
+        db.session.add(m)
+    return m
+
+
+def _ensure_host_in_group(host_id: int, group_id: int):
+    """Add host to group if not already a member; return the membership row."""
+    m = HostGroupMembership.query.filter_by(host_id=host_id, group_id=group_id).first()
+    if not m:
+        m = HostGroupMembership(host_id=host_id, group_id=group_id, status='active')
+        db.session.add(m)
+    return m
+
+
+def _get_user_cert_ca_key(user_id: int) -> str:
+    """Return the CA key path to use when signing a user cert.
+
+    Simple mode  → always the main site CA.
+    Multi-group  → the CA key of the user's first active group membership.
+                   Falls back to the main CA if the user somehow has none.
+    """
+    if not get_multi_group_enabled():
+        return cert_gen.ca_key
+    m = (UserGroupMembership.query
+         .filter_by(user_id=user_id, status='active')
+         .join(CAGroup)
+         .first())
+    if m:
+        return m.group.effective_ca_key
+    return cert_gen.ca_key
+
+
+def _pending_group_request_count() -> int:
+    """Total pending user-group membership requests visible to current user."""
+    if not current_user.is_authenticated:
+        return 0
+    try:
+        if current_user.is_admin:
+            return UserGroupMembership.query.filter_by(status='pending').count()
+        # Group owners see pending requests for groups they created
+        owned = CAGroup.query.filter_by(created_by_id=current_user.id).all()
+        total = 0
+        for g in owned:
+            total += sum(1 for m in g.user_memberships if m.status == 'pending')
+            total += sum(1 for m in g.host_memberships if m.status == 'pending')
+        return total
+    except Exception:
+        return 0
 
 
 def _get_or_create_host_alias(host_id: int, alias: str) -> 'HostAlias':
@@ -487,12 +691,14 @@ class SSHCertificateGenerator:
             return None
 
     def generate_user_certificate(self, public_key_path, username, valid_days=365,
-                                   principals=None, critical_options=None):
+                                   principals=None, critical_options=None,
+                                   ca_key_override=None):
         if principals is None:
             principals = [username]
+        signing_key = ca_key_override or self.ca_key
         serial = int(datetime.now().timestamp() * 1000)
         cmd = [
-            'ssh-keygen', '-s', self.ca_key,
+            'ssh-keygen', '-s', signing_key,
             '-I', f'{username}-{serial}',
             '-n', ','.join(principals),
             '-V', f'always:+{valid_days}d',
@@ -561,6 +767,7 @@ _CA_SETUP_ALLOWED_ENDPOINTS = {
     'api_cert_install_data', 'api_cert_install_script',
     'api_cert_user', 'api_cert_host',
     'download_sshadmin_add', 'download_sshadmin_ps1',
+    'help_index', 'help_key_concepts', 'help_security_model', 'help_groups',
 }
 
 
@@ -575,6 +782,14 @@ def _redirect_admin_to_setup_when_ca_missing():
     if not getattr(current_user, 'is_admin', False):
         return
     return redirect(url_for('setup_ca'))
+
+
+@app.context_processor
+def inject_globals():
+    return {
+        'pending_group_requests': _pending_group_request_count(),
+        'multi_group_enabled': get_multi_group_enabled(),
+    }
 
 
 @app.context_processor
@@ -1922,16 +2137,23 @@ def _do_issue_host_cert(host, requester_id, valid_days=365):
 
 
 def _do_issue_user_cert(credential, requester_id, principals=None, valid_days=365,
-                        critical_options=None):
-    """Issue a user certificate. Caller is responsible for auth checks and commit."""
+                        critical_options=None, ca_key_override=None):
+    """Issue a user certificate. Caller is responsible for auth checks and commit.
+
+    ca_key_override lets the group machinery supply the correct group CA key.
+    In simple mode (default) the main site CA is used.
+    """
     if not principals:
         principals = [credential.unix_username]
+    # Resolve which CA signs this cert: explicit override > group CA > site CA
+    signing_key = ca_key_override or _get_user_cert_ca_key(credential.user_id)
     with tempfile.NamedTemporaryFile(mode='w', delete=False, suffix='.pub') as f:
         f.write(credential.user_key.public_key)
         tmp = f.name
     try:
         cert_data, serial = cert_gen.generate_user_certificate(
-            tmp, credential.unix_username, valid_days, principals, critical_options)
+            tmp, credential.unix_username, valid_days, principals, critical_options,
+            ca_key_override=signing_key)
     finally:
         os.unlink(tmp)
     cert = Certificate(
@@ -2063,6 +2285,14 @@ def _ssh_add_machine(requester_user_id: int, data: dict) -> dict:
         # ── Store connect_host as alias (auto-expands principals in strict mode) ─
         if enroll_host and connect_host and connect_host != hostname:
             _get_or_create_host_alias(host.id, connect_host)
+            db.session.flush()
+
+        # ── Ensure default group membership ───────────────────────────────────
+        default_group = CAGroup.query.filter_by(name='default').first()
+        if default_group:
+            _ensure_user_in_group(requester.id, default_group.id, auto_approve=True)
+            if enroll_host and host.is_enrolled:
+                _ensure_host_in_group(host.id, default_group.id)
             db.session.flush()
 
         # ── Issue certs ───────────────────────────────────────────────────────
@@ -2269,6 +2499,222 @@ def _ssh_add_alias(requester_user_id: int, data: dict) -> dict:
         }
 
 
+# ==================== CA Group Management ====================
+
+@app.route('/groups')
+@login_required
+def groups():
+    multi_enabled = get_multi_group_enabled()
+    all_groups = CAGroup.query.order_by(CAGroup.name).all()
+    # User's own memberships
+    my_memberships = {m.group_id: m for m in current_user.group_memberships}
+    return render_template('groups.html',
+                           all_groups=all_groups,
+                           my_memberships=my_memberships,
+                           multi_enabled=multi_enabled)
+
+
+@app.route('/groups/create', methods=['GET', 'POST'])
+@login_required
+def create_group():
+    if not get_multi_group_enabled():
+        flash('Multi-group mode is not enabled. Enable it in Admin Settings first.', 'warning')
+        return redirect(url_for('groups'))
+    if request.method == 'POST':
+        name = request.form.get('name', '').strip().lower()
+        description = request.form.get('description', '').strip()
+        if not name or name == 'default':
+            flash('Invalid group name.', 'error')
+            return redirect(url_for('create_group'))
+        if CAGroup.query.filter_by(name=name).first():
+            flash(f'Group "{name}" already exists.', 'error')
+            return redirect(url_for('create_group'))
+
+        # Generate a dedicated CA keypair for this group
+        ca_key_dir = os.path.dirname(cert_gen.ca_key)
+        ca_key_path = os.path.join(ca_key_dir, f'ca_group_{name}_key')
+        try:
+            subprocess.run(
+                ['ssh-keygen', '-t', 'ecdsa', '-b', '521',
+                 '-f', ca_key_path, '-N', '', '-C', f'sshadmin-ca-group-{name}'],
+                capture_output=True, text=True, check=True,
+            )
+            os.chmod(ca_key_path, 0o600)
+            os.chmod(ca_key_path + '.pub', 0o644)
+        except Exception as exc:
+            flash(f'Failed to generate CA key for group: {exc}', 'error')
+            return redirect(url_for('create_group'))
+
+        group = CAGroup(
+            name=name,
+            description=description or f'Group {name}',
+            ca_key_path=ca_key_path,
+            created_by_id=current_user.id,
+        )
+        db.session.add(group)
+        db.session.flush()
+        # Creator automatically gets active membership
+        _ensure_user_in_group(current_user.id, group.id, auto_approve=True)
+        db.session.commit()
+        flash(f'Group "{name}" created.', 'success')
+        return redirect(url_for('group_detail', group_id=group.id))
+    return render_template('group_create.html')
+
+
+@app.route('/groups/<int:group_id>')
+@login_required
+def group_detail(group_id):
+    group = CAGroup.query.get_or_404(group_id)
+    is_owner = (current_user.is_admin or group.created_by_id == current_user.id)
+    my_membership = UserGroupMembership.query.filter_by(
+        user_id=current_user.id, group_id=group.id).first()
+    all_users = User.query.filter(User.completed_at.isnot(None)).order_by(User.username).all()
+    all_hosts = Host.query.order_by(Host.hostname).all()
+    enrolled_host_ids = {m.host_id for m in group.host_memberships if m.status == 'active'}
+    return render_template('group_detail.html',
+                           group=group,
+                           is_owner=is_owner,
+                           my_membership=my_membership,
+                           all_users=all_users,
+                           all_hosts=all_hosts,
+                           enrolled_host_ids=enrolled_host_ids)
+
+
+@app.route('/groups/<int:group_id>/request-access', methods=['POST'])
+@login_required
+def group_request_access(group_id):
+    group = CAGroup.query.get_or_404(group_id)
+    principals = request.form.get('unix_principals', '').strip()
+    m = UserGroupMembership.query.filter_by(
+        user_id=current_user.id, group_id=group_id).first()
+    if m and m.status == 'active':
+        flash('You are already an active member of this group.', 'info')
+        return redirect(url_for('group_detail', group_id=group_id))
+    if m:
+        m.status = 'pending'
+        m.unix_principals = principals or None
+        m.requested_at = datetime.utcnow()
+        m.approved_at = None
+    else:
+        m = UserGroupMembership(
+            user_id=current_user.id, group_id=group_id,
+            status='pending', unix_principals=principals or None,
+        )
+        db.session.add(m)
+    db.session.commit()
+    flash(f'Access request submitted to group "{group.name}". '
+          'The group owner will review it.', 'success')
+    return redirect(url_for('groups'))
+
+
+@app.route('/groups/<int:group_id>/approve-user/<int:membership_id>', methods=['POST'])
+@login_required
+def group_approve_user(group_id, membership_id):
+    group = CAGroup.query.get_or_404(group_id)
+    if not (current_user.is_admin or group.created_by_id == current_user.id):
+        flash('Only the group owner or an admin can approve members.', 'error')
+        return redirect(url_for('group_detail', group_id=group_id))
+    m = UserGroupMembership.query.get_or_404(membership_id)
+    principals_override = request.form.get('unix_principals', '').strip()
+    if principals_override:
+        m.unix_principals = principals_override
+    m.status = 'active'
+    m.approved_at = datetime.utcnow()
+    m.approved_by_id = current_user.id
+    db.session.commit()
+    flash(f'User "{m.user.username}" approved for group "{group.name}".', 'success')
+    return redirect(url_for('group_detail', group_id=group_id))
+
+
+@app.route('/groups/<int:group_id>/reject-user/<int:membership_id>', methods=['POST'])
+@login_required
+def group_reject_user(group_id, membership_id):
+    group = CAGroup.query.get_or_404(group_id)
+    if not (current_user.is_admin or group.created_by_id == current_user.id):
+        flash('Only the group owner or an admin can reject members.', 'error')
+        return redirect(url_for('group_detail', group_id=group_id))
+    m = UserGroupMembership.query.get_or_404(membership_id)
+    m.status = 'rejected'
+    db.session.commit()
+    flash(f'Access request from "{m.user.username}" rejected.', 'warning')
+    return redirect(url_for('group_detail', group_id=group_id))
+
+
+@app.route('/groups/<int:group_id>/remove-user/<int:membership_id>', methods=['POST'])
+@login_required
+def group_remove_user(group_id, membership_id):
+    group = CAGroup.query.get_or_404(group_id)
+    if not (current_user.is_admin or group.created_by_id == current_user.id):
+        flash('Only the group owner or an admin can remove members.', 'error')
+        return redirect(url_for('group_detail', group_id=group_id))
+    m = UserGroupMembership.query.get_or_404(membership_id)
+    if group.is_default and not current_user.is_admin:
+        flash('Cannot remove users from the default group.', 'error')
+        return redirect(url_for('group_detail', group_id=group_id))
+    db.session.delete(m)
+    db.session.commit()
+    flash(f'User removed from group "{group.name}".', 'success')
+    return redirect(url_for('group_detail', group_id=group_id))
+
+
+@app.route('/groups/<int:group_id>/add-host', methods=['POST'])
+@login_required
+def group_add_host(group_id):
+    group = CAGroup.query.get_or_404(group_id)
+    host_id = request.form.get('host_id', type=int)
+    if not host_id:
+        flash('No host selected.', 'error')
+        return redirect(url_for('group_detail', group_id=group_id))
+    host = Host.query.get_or_404(host_id)
+    if not (_can_admin_host(host) or current_user.is_admin or group.created_by_id == current_user.id):
+        flash('You must be the host owner or group owner to add a host.', 'error')
+        return redirect(url_for('group_detail', group_id=group_id))
+    _ensure_host_in_group(host.id, group.id)
+    db.session.commit()
+    flash(f'Host "{host.hostname}" added to group "{group.name}". '
+          'Re-enroll the host to update its TrustedUserCAKeys.', 'success')
+    return redirect(url_for('group_detail', group_id=group_id))
+
+
+@app.route('/groups/<int:group_id>/remove-host/<int:membership_id>', methods=['POST'])
+@login_required
+def group_remove_host(group_id, membership_id):
+    group = CAGroup.query.get_or_404(group_id)
+    if not (current_user.is_admin or group.created_by_id == current_user.id):
+        flash('Only the group owner or an admin can remove hosts.', 'error')
+        return redirect(url_for('group_detail', group_id=group_id))
+    m = HostGroupMembership.query.get_or_404(membership_id)
+    if group.is_default and not current_user.is_admin:
+        flash('Cannot remove hosts from the default group.', 'error')
+        return redirect(url_for('group_detail', group_id=group_id))
+    db.session.delete(m)
+    db.session.commit()
+    flash(f'Host removed from group "{group.name}".', 'success')
+    return redirect(url_for('group_detail', group_id=group_id))
+
+
+# ==================== Help / Documentation ====================
+
+@app.route('/help')
+def help_index():
+    return render_template('help/index.html')
+
+
+@app.route('/help/key-concepts')
+def help_key_concepts():
+    return render_template('help/key_concepts.html')
+
+
+@app.route('/help/security-model')
+def help_security_model():
+    return render_template('help/security_model.html')
+
+
+@app.route('/help/groups')
+def help_groups():
+    return render_template('help/groups.html')
+
+
 # ==================== Admin Settings ====================
 
 @app.route('/admin/settings', methods=['GET', 'POST'])
@@ -2293,6 +2739,13 @@ def admin_settings():
         else:
             db.session.add(SiteConfig(key='strict_host_principals', value=strict))
 
+        multi = '1' if request.form.get('multi_group_enabled') else '0'
+        cfg_multi = db.session.get(SiteConfig, 'multi_group_enabled')
+        if cfg_multi:
+            cfg_multi.value = multi
+        else:
+            db.session.add(SiteConfig(key='multi_group_enabled', value=multi))
+
         db.session.commit()
         flash('Settings saved.', 'success')
         return redirect(url_for('admin_settings'))
@@ -2301,7 +2754,8 @@ def admin_settings():
     return render_template('admin_settings.html',
                            all_key_type_options=ALL_USER_KEY_TYPE_OPTIONS,
                            current_types=current_types,
-                           strict_host_principals=get_strict_host_principals())
+                           strict_host_principals=get_strict_host_principals(),
+                           multi_group_enabled=get_multi_group_enabled())
 
 
 # ==================== Error handlers ====================
@@ -2369,6 +2823,7 @@ def _start_ssh_auth_server_if_enabled():
 if __name__ == '__main__':
     with app.app_context():
         db.create_all()
+        _ensure_default_group()
     _log_startup_status()
     _start_ssh_auth_server_if_enabled()
     app.run(debug=True, host='0.0.0.0', port=5000, use_reloader=False)

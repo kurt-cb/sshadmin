@@ -1,0 +1,150 @@
+{% extends "base.html" %}
+{% block title %}CA Groups - SSH Certificate Admin{% endblock %}
+
+{% block content %}
+<nav aria-label="breadcrumb" class="mb-3">
+  <ol class="breadcrumb">
+    <li class="breadcrumb-item"><a href="{{ url_for('help_index') }}">Help</a></li>
+    <li class="breadcrumb-item active">CA Groups</li>
+  </ol>
+</nav>
+
+<h1 class="mb-4"><i class="bi bi-diagram-3"></i> CA Groups</h1>
+
+<div class="card mb-4">
+  <div class="card-header">The Problem Groups Solve</div>
+  <div class="card-body">
+    <p>In the default (simple) mode, all machines trust the same User CA. This means a valid
+    user certificate works on <em>every enrolled machine</em>. That is convenient for small
+    environments where everyone should have access to everything, but becomes a problem when:</p>
+    <ul>
+      <li>Accounting staff should not reach production engineering hosts.</li>
+      <li>Contractors need access to specific machines but not others.</li>
+      <li>You want to scope an access breach to a subset of machines.</li>
+    </ul>
+    <p class="mb-0">CA Groups solve this by giving each zone its own CA key.
+    A cert signed by the Accounting CA is <strong>cryptographically rejected</strong>
+    by a machine that only trusts the Engineering CA — no policy rule, no runtime check,
+    just math.</p>
+  </div>
+</div>
+
+<div class="card mb-4">
+  <div class="card-header">How Groups Work</div>
+  <div class="card-body">
+    <p>There are two independent membership relationships:</p>
+    <div class="row g-3 mb-3">
+      <div class="col-md-6">
+        <div class="border rounded p-3 h-100">
+          <h6><i class="bi bi-hdd-rack text-success"></i> Machine → Group</h6>
+          <p class="small mb-1">The machine owner requests to join a group. The group owner approves.
+          The machine's <code>TrustedUserCAKeys</code> is updated to include the group's CA public key.</p>
+          <p class="small mb-0 text-muted">A machine can be in <strong>multiple groups</strong>,
+          trusting multiple CAs simultaneously. Users from any of those groups can then connect.</p>
+        </div>
+      </div>
+      <div class="col-md-6">
+        <div class="border rounded p-3 h-100">
+          <h6><i class="bi bi-person text-primary"></i> User → Group</h6>
+          <p class="small mb-1">The user requests group access, specifying which unix accounts they need.
+          The group owner approves and may adjust the allowed accounts. A cert signed by the group CA
+          is then issued to the user.</p>
+          <p class="small mb-0 text-muted">Group membership grants access to <strong>all machines in the group</strong>,
+          not just one specific machine.</p>
+        </div>
+      </div>
+    </div>
+    <div class="alert alert-info small mb-0">
+      <i class="bi bi-info-circle"></i>
+      <strong>The machine owner controls which groups their machine trusts (which users can reach it).
+      The group owner controls which users are in the group (who gets a cert).</strong>
+      These two decisions are independent — no single person has unilateral control over both.
+    </div>
+  </div>
+</div>
+
+<div class="card mb-4">
+  <div class="card-header">The foo1 / foo2 Example</div>
+  <div class="card-body">
+    <p>Alice is in the <strong>Accounting</strong> group. Bob is in the <strong>HR</strong> group.</p>
+    <ul>
+      <li><strong>foo1</strong> is in Accounting + HR — trusts both CAs. Both Alice and Bob can log in.</li>
+      <li><strong>foo2</strong> is in HR only — trusts only the HR CA. Bob can log in; Alice's Accounting cert is rejected.</li>
+      <li><strong>foo3</strong> is in Accounting only — Alice can log in; Bob cannot.</li>
+    </ul>
+    <p class="mb-0">No per-machine user lists to maintain. The machine owner's only decision:
+    which groups to join. The group owner's only decision: which users belong.</p>
+  </div>
+</div>
+
+<div class="card mb-4">
+  <div class="card-header">The Default Group</div>
+  <div class="card-body">
+    <p>The <strong>default</strong> group always exists and uses the main site CA key.
+    In simple mode (multi-group disabled) all users and hosts are in it automatically —
+    behaviour is identical to pre-group operation.</p>
+    <p class="mb-0">When you enable multi-group mode, the default group remains for hosts
+    and users that don't need isolation. New groups are opt-in; nothing breaks.</p>
+  </div>
+</div>
+
+<div class="card mb-4">
+  <div class="card-header">Governance</div>
+  <div class="card-body">
+    <table class="table table-sm small mb-0">
+      <thead class="table-light">
+        <tr><th>Action</th><th>Who decides</th></tr>
+      </thead>
+      <tbody>
+        <tr><td>Create a group</td><td>Any registered user → becomes group owner</td></tr>
+        <tr><td>Machine joins group</td><td>Machine owner requests → group owner approves</td></tr>
+        <tr><td>User joins group</td><td>User requests → group owner approves and sets allowed unix accounts</td></tr>
+        <tr><td>Revoke user from group</td><td>Group owner (or sshadmin admin)</td></tr>
+        <tr><td>Remove machine from group</td><td>Group owner (or sshadmin admin)</td></tr>
+        <tr><td>Default group membership</td><td>Automatic in simple mode; admin-managed in multi-group mode</td></tr>
+        <tr><td>Admin override</td><td>sshadmin admin can approve/revoke anything — logged and visible to group owner</td></tr>
+      </tbody>
+    </table>
+  </div>
+</div>
+
+<div class="card mb-4">
+  <div class="card-header">Getting a Certificate (Multi-Group Mode)</div>
+  <div class="card-body">
+    <ol>
+      <li>Register your sshadmin account and upload your public key.</li>
+      <li>Request access to the group that covers the machines you need
+          (from the <a href="{{ url_for('groups') }}">Groups</a> page).</li>
+      <li>The group owner approves your request and sets your allowed unix accounts.</li>
+      <li>Run <code>sshadmin get-cert</code> on your machine — it SSHes to the sshadmin server,
+          checks your group membership, and downloads a cert signed by the group CA.</li>
+      <li><code>ssh alice@foo1</code> — works immediately. No per-machine setup needed on your end.</li>
+    </ol>
+    <p class="small text-muted mb-0">
+      Steps 1–3 happen once (or when you need a new group). Step 4 repeats whenever your cert
+      expires (automated with a short-lived cert wrapper or cron job).
+    </p>
+  </div>
+</div>
+
+<div class="card mb-4">
+  <div class="card-header">When to Use Multiple Groups</div>
+  <div class="card-body">
+    <ul>
+      <li><strong>Departments</strong>: Accounting, HR, Engineering each get a group. Staff are in the group(s) they need.</li>
+      <li><strong>Environments</strong>: Dev, Staging, Prod groups. Developers are in Dev; ops in all three.</li>
+      <li><strong>Contractors</strong>: A narrow group with only the specific machines the contractor needs.</li>
+      <li><strong>Break-glass</strong>: An "admin" group with very few members and strict monitoring.</li>
+    </ul>
+    <p class="mb-0 text-muted small">If everyone should reach everything, stay in simple mode.
+    Add groups when you need cryptographic isolation, not just policy enforcement.</p>
+  </div>
+</div>
+
+<div class="d-flex gap-2 mt-4">
+  <a href="{{ url_for('help_security_model') }}" class="btn btn-outline-secondary">← Security Model</a>
+  {% if multi_group_enabled %}
+  <a href="{{ url_for('groups') }}" class="btn btn-outline-primary">Manage Groups →</a>
+  {% endif %}
+</div>
+{% endblock %}

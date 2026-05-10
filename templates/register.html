@@ -298,7 +298,7 @@
                 </label>
                 <input type="text" class="form-control" id="unix_username" name="unix_username"
                        placeholder="e.g. alice" required>
-                <div class="form-text">
+                <div class="form-text" id="unix-username-hint">
                   Output of <code>whoami</code> on your machine — becomes the certificate
                   principal.
                 </div>
@@ -324,17 +324,213 @@
         </div>
       </div>
 
-      <div class="card border-0 bg-light mb-3">
-        <div class="card-body py-2 px-3">
-          <p class="small text-muted mb-1">
-            <i class="bi bi-info-circle"></i>
-            <strong>Trust host certificates</strong> — add the CA to
-            <code>~/.ssh/known_hosts</code> so SSH auto-accepts managed servers:
-          </p>
-          <pre class="bg-white border rounded p-2 mb-1" style="font-size:0.75rem;white-space:pre-wrap;">echo "@cert-authority * $(curl -fsSL '{{ url_for('api_ca_pubkey', _external=True) }}')" >> ~/.ssh/known_hosts</pre>
-          <p class="small text-muted mb-0">
-            Already have an account? <a href="{{ url_for('login') }}">Log in</a>
-          </p>
+      {# ── Platform-specific next steps (synced to keygen tab above) ─────── #}
+      {# JS below watches #keygenTabs and shows the matching platform block.  #}
+
+      {# Linux / macOS ──────────────────────────────────────────────────────── #}
+      <div class="reg-platform-block" data-platform="tab-linux">
+        <div class="card border-0 bg-light mb-3">
+          <div class="card-body py-2 px-3">
+            <p class="small text-muted mb-1">
+              <i class="bi bi-info-circle"></i>
+              <strong>Trust host certificates</strong> — add the CA to
+              <code>~/.ssh/known_hosts</code> so SSH auto-accepts managed servers:
+            </p>
+            <pre class="bg-white border rounded p-2 mb-1" style="font-size:0.75rem;white-space:pre-wrap;">echo "@cert-authority * $(curl -fsSL '{{ url_for('api_ca_pubkey', _external=True) }}')" >> ~/.ssh/known_hosts</pre>
+            <p class="small text-muted mb-1">
+              <strong>OS / Unix Username</strong> — run <code>whoami</code> in your terminal.
+            </p>
+            <p class="small text-muted mb-0">Already have an account? <a href="{{ url_for('login') }}">Log in</a></p>
+          </div>
+        </div>
+        <div class="card mb-3">
+          <div class="card-header fw-semibold"><i class="bi bi-signpost-split"></i> What Happens After Registration?</div>
+          <div class="card-body small">
+            {% if multi_group_enabled %}
+            <ol class="mb-2">
+              <li>Your account is created and verified via SSH key signature.</li>
+              <li>You are automatically placed in the <strong>default</strong> group.</li>
+              <li>For restricted groups: go to <a href="{{ url_for('groups') }}">Groups</a> and click <em>Request Access</em>.</li>
+              <li>Once approved, run <code>sshadmin get-cert</code> — your cert is downloaded and configured.</li>
+              <li><code>ssh $USER@enrolled-machine</code> — no password needed.</li>
+            </ol>
+            <a href="{{ url_for('help_groups') }}" class="small">How CA groups work →</a>
+            {% else %}
+            <ol class="mb-0">
+              <li>Your account is created and your key is registered.</li>
+              <li>A user certificate is issued for the unix account you specified.</li>
+              <li><code>ssh $USER@enrolled-machine</code> — works with no password.</li>
+            </ol>
+            {% endif %}
+          </div>
+        </div>
+      </div>
+
+      {# Windows PowerShell ─────────────────────────────────────────────────── #}
+      <div class="reg-platform-block d-none" data-platform="tab-powershell">
+        <div class="card border-0 bg-light mb-3">
+          <div class="card-body py-2 px-3">
+            <p class="small text-muted mb-1">
+              <i class="bi bi-info-circle"></i>
+              <strong>Trust host certificates</strong> — add the CA to your
+              <code>known_hosts</code> file:
+            </p>
+            <pre class="bg-white border rounded p-2 mb-1" style="font-size:0.75rem;white-space:pre-wrap;">$ca = (Invoke-WebRequest '{{ url_for('api_ca_pubkey', _external=True) }}').Content.Trim()
+Add-Content "$env:USERPROFILE\.ssh\known_hosts" "@cert-authority * $ca"</pre>
+            <p class="small text-muted mb-1">
+              <strong>OS / Unix Username</strong> — use <code>$env:USERNAME</code> (your Windows account name).
+            </p>
+            <p class="small text-muted mb-0">Already have an account? <a href="{{ url_for('login') }}">Log in</a></p>
+          </div>
+        </div>
+        <div class="card mb-3">
+          <div class="card-header fw-semibold"><i class="bi bi-signpost-split"></i> What Happens After Registration?</div>
+          <div class="card-body small">
+            {% if multi_group_enabled %}
+            <ol class="mb-2">
+              <li>Your account is created and verified via SSH key signature.</li>
+              <li>You are automatically placed in the <strong>default</strong> group.</li>
+              <li>For restricted groups: go to <a href="{{ url_for('groups') }}">Groups</a> and click <em>Request Access</em>.</li>
+              <li>Once approved, run <code>.\sshadmin.ps1 get-cert</code> to download and install your certificate.</li>
+              <li><code>ssh $env:USERNAME@enrolled-machine</code> — no password needed.</li>
+            </ol>
+            <a href="{{ url_for('help_groups') }}" class="small">How CA groups work →</a>
+            {% else %}
+            <ol class="mb-0">
+              <li>Your account is created and your key is registered.</li>
+              <li>A user certificate is issued for the unix account you specified.</li>
+              <li>Download <code>sshadmin.ps1</code> from the Hosts page and run it to enroll machines.</li>
+              <li><code>ssh $env:USERNAME@enrolled-machine</code> — works with no password.</li>
+            </ol>
+            {% endif %}
+          </div>
+        </div>
+      </div>
+
+      {# PuTTY ──────────────────────────────────────────────────────────────── #}
+      <div class="reg-platform-block d-none" data-platform="tab-putty">
+        <div class="card border-0 bg-light mb-3">
+          <div class="card-body py-2 px-3">
+            <p class="small text-muted mb-1">
+              <i class="bi bi-info-circle"></i>
+              <strong>Trust host certificates</strong> — PuTTY does not support OpenSSH-format
+              CA host verification directly. For full certificate support, use the
+              <strong>Windows PowerShell</strong> tab with OpenSSH for Windows, or configure
+              PuTTY to use an OpenSSH-compatible CA via <em>Connection &gt; SSH &gt; Host keys</em>.
+            </p>
+            <p class="small text-muted mb-1">
+              <strong>OS / Unix Username</strong> — your Windows account name (shown in
+              <em>Settings &gt; Accounts</em>) or the unix username on the remote machine.
+            </p>
+            <p class="small text-muted mb-0">Already have an account? <a href="{{ url_for('login') }}">Log in</a></p>
+          </div>
+        </div>
+        <div class="card mb-3">
+          <div class="card-header fw-semibold"><i class="bi bi-signpost-split"></i> What Happens After Registration?</div>
+          <div class="card-body small">
+            <ol class="mb-2">
+              <li>Your account is created and your public key is registered.</li>
+              <li>A user certificate (<code>-cert.pub</code>) is issued alongside your key.</li>
+              <li>In PuTTY, load your private key (<code>.ppk</code>) in <em>Connection &gt; SSH &gt; Auth</em>.
+                  PuTTY will automatically present the matching certificate if it is in the same directory.</li>
+              <li>Connect to the enrolled machine — authentication proceeds via certificate.</li>
+            </ol>
+            <div class="alert alert-info mb-0 small py-2">
+              <i class="bi bi-info-circle"></i>
+              PuTTY 0.78+ supports SSH certificates. Ensure your PuTTY version is up to date.
+              The <code>-cert.pub</code> file must be placed alongside the <code>.ppk</code> file.
+            </div>
+          </div>
+        </div>
+      </div>
+
+      {# TeraTerm ───────────────────────────────────────────────────────────── #}
+      <div class="reg-platform-block d-none" data-platform="tab-teraterm">
+        <div class="card border-0 bg-light mb-3">
+          <div class="card-body py-2 px-3">
+            <p class="small text-muted mb-1">
+              <i class="bi bi-info-circle"></i>
+              <strong>Trust host certificates</strong> — TeraTerm uses its own
+              <code>KNOWNHOSTS</code> file and does not support OpenSSH CA-based host
+              verification. Host certificate checking will not apply; TeraTerm will prompt
+              on first connection as usual.
+            </p>
+            <p class="small text-muted mb-1">
+              <strong>OS / Unix Username</strong> — your Windows account name or the remote unix username.
+            </p>
+            <p class="small text-muted mb-0">Already have an account? <a href="{{ url_for('login') }}">Log in</a></p>
+          </div>
+        </div>
+        <div class="card mb-3">
+          <div class="card-header fw-semibold"><i class="bi bi-signpost-split"></i> What Happens After Registration?</div>
+          <div class="card-body small">
+            <ol class="mb-2">
+              <li>Your account is created and your public key is registered.</li>
+              <li>A user certificate (<code>-cert.pub</code>) is issued. Download it from
+                  the Certificates page.</li>
+              <li>In TeraTerm: <em>Setup &gt; SSH Authentication</em> — set your private key file.
+                  Place the <code>-cert.pub</code> file in the same directory.</li>
+              <li>Connect to the enrolled machine — TeraTerm will use the certificate for authentication.</li>
+            </ol>
+            <div class="alert alert-warning mb-0 small py-2">
+              <i class="bi bi-exclamation-triangle"></i>
+              TeraTerm SSH certificate support varies by version. TeraTerm 5.x with the TTSSH module
+              supports OpenSSH certificates. Check your version before proceeding.
+            </div>
+          </div>
+        </div>
+      </div>
+
+      {# Dropbear / Alpine ──────────────────────────────────────────────────── #}
+      <div class="reg-platform-block d-none" data-platform="tab-dropbear">
+        <div class="card border-0 bg-light mb-3">
+          <div class="card-body py-2 px-3">
+            <p class="small text-muted mb-1">
+              <i class="bi bi-info-circle"></i>
+              <strong>Trust host certificates</strong> — using <code>wget</code>
+              (available on Alpine/busybox without additional packages):
+            </p>
+            <pre class="bg-white border rounded p-2 mb-1" style="font-size:0.75rem;white-space:pre-wrap;">echo "@cert-authority * $(wget -qO- '{{ url_for('api_ca_pubkey', _external=True) }}')" >> ~/.ssh/known_hosts</pre>
+            <p class="small text-muted mb-1">
+              <strong>Note:</strong> Host certificate verification requires <strong>OpenSSH</strong>
+              as the client (<code>ssh</code>). Dropbear's <code>dbclient</code> does not support
+              CA-based host verification. Install OpenSSH client with
+              <code>apk add openssh-client</code> for full certificate support.
+            </p>
+            <p class="small text-muted mb-1">
+              <strong>OS / Unix Username</strong> — run <code>whoami</code> in your shell.
+            </p>
+            <p class="small text-muted mb-0">Already have an account? <a href="{{ url_for('login') }}">Log in</a></p>
+          </div>
+        </div>
+        <div class="card mb-3">
+          <div class="card-header fw-semibold"><i class="bi bi-signpost-split"></i> What Happens After Registration?</div>
+          <div class="card-body small">
+            {% if multi_group_enabled %}
+            <ol class="mb-2">
+              <li>Your account is created and verified via SSH key signature.</li>
+              <li>You are automatically placed in the <strong>default</strong> group.</li>
+              <li>For restricted groups: go to <a href="{{ url_for('groups') }}">Groups</a> and click <em>Request Access</em>.</li>
+              <li>Once approved, download your certificate from the Certificates page and place it at
+                  <code>~/.ssh/id_sshadmin-cert.pub</code>.</li>
+              <li><code>ssh $USER@enrolled-machine</code> — no password needed (requires OpenSSH client).</li>
+            </ol>
+            <a href="{{ url_for('help_groups') }}" class="small">How CA groups work →</a>
+            {% else %}
+            <ol class="mb-2">
+              <li>Your account is created and your key is registered.</li>
+              <li>A user certificate is issued for the unix account you specified.</li>
+              <li>Download your certificate from the Certificates page and place it at
+                  <code>~/.ssh/id_sshadmin-cert.pub</code>.</li>
+              <li>With OpenSSH client: <code>ssh $USER@enrolled-machine</code> — no password.</li>
+            </ol>
+            {% endif %}
+            <div class="alert alert-info mb-0 small py-2">
+              <i class="bi bi-info-circle"></i>
+              Dropbear's <code>dbclient</code> does not support SSH user certificates.
+              Install <code>apk add openssh-client</code> to use <code>ssh</code> with cert auth.
+            </div>
+          </div>
         </div>
       </div>
 
@@ -374,6 +570,31 @@
 <script>
 (function () {
   var ALLOWED = {{ allowed_key_types | tojson }};
+
+  // Platform block sync — show the block matching the active keygen tab
+  function syncPlatformBlock(tabTarget) {
+    var platform = tabTarget.replace(/^#/, '');
+    document.querySelectorAll('.reg-platform-block').forEach(function (el) {
+      el.classList.toggle('d-none', el.getAttribute('data-platform') !== platform);
+    });
+    var hint = document.getElementById('unix-username-hint');
+    if (hint) {
+      if (platform === 'tab-powershell') {
+        hint.innerHTML = 'Your Windows account name — run <code>$env:USERNAME</code> in PowerShell.';
+      } else if (platform === 'tab-putty' || platform === 'tab-teraterm') {
+        hint.innerHTML = 'Your Windows account name or the remote unix username.';
+      } else {
+        hint.innerHTML = 'Output of <code>whoami</code> on your machine — becomes the certificate principal.';
+      }
+    }
+  }
+
+  var keygenTabs = document.getElementById('keygenTabs');
+  if (keygenTabs) {
+    keygenTabs.addEventListener('shown.bs.tab', function (e) {
+      syncPlatformBlock(e.target.getAttribute('data-bs-target'));
+    });
+  }
 
   // Copy buttons
   document.querySelectorAll('[data-copy-target]').forEach(function (btn) {

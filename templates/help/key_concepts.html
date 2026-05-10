@@ -1,0 +1,109 @@
+{% extends "base.html" %}
+{% block title %}Key Concepts - SSH Certificate Admin{% endblock %}
+
+{% block content %}
+<nav aria-label="breadcrumb" class="mb-3">
+  <ol class="breadcrumb">
+    <li class="breadcrumb-item"><a href="{{ url_for('help_index') }}">Help</a></li>
+    <li class="breadcrumb-item active">Key Concepts</li>
+  </ol>
+</nav>
+
+<h1 class="mb-4"><i class="bi bi-lightbulb"></i> Key Concepts</h1>
+
+<div class="card mb-4">
+  <div class="card-header">What is an SSH Certificate?</div>
+  <div class="card-body">
+    <p>An <strong>SSH certificate</strong> is a signed public key. Unlike the traditional
+    <code>authorized_keys</code> approach — where every server must store a copy of every
+    user's public key — certificates work differently:</p>
+    <ul>
+      <li>A <strong>Certificate Authority (CA)</strong> signs a user's public key, producing a certificate.</li>
+      <li>Each server is configured to <strong>trust the CA</strong> (one line in <code>sshd_config</code>).</li>
+      <li>When the user connects, the server verifies the certificate against the CA — no per-user configuration needed.</li>
+    </ul>
+    <p class="mb-0">This means adding or revoking a user's access doesn't require touching every server;
+    you control it centrally through certificate issuance and expiry.</p>
+  </div>
+</div>
+
+<div class="card mb-4">
+  <div class="card-header">Host Certificates vs. User Certificates</div>
+  <div class="card-body">
+    <div class="row g-3">
+      <div class="col-md-6">
+        <h6 class="text-primary">Host Certificates</h6>
+        <p class="small">Prove that a <em>server</em> is who it claims to be. Replaces the
+        "do you want to trust this unknown host key?" prompt clients see on first connection.
+        Once the CA is in the client's <code>known_hosts</code>, any CA-signed host is trusted
+        automatically — no per-host fingerprint to manage.</p>
+        <p class="small mb-0">Signed by the <strong>site-wide Host CA</strong> (same CA for all hosts).</p>
+      </div>
+      <div class="col-md-6">
+        <h6 class="text-success">User Certificates</h6>
+        <p class="small">Prove that a <em>user</em> is allowed to log in. The certificate lists
+        the unix account names the user may access (<em>principals</em>). The server checks
+        that the cert is CA-signed and that the requested login name is in the principals list.</p>
+        <p class="small mb-0">Signed by a <strong>User CA</strong> — in multi-group mode, each
+        group has its own User CA key.</p>
+      </div>
+    </div>
+  </div>
+</div>
+
+<div class="card mb-4">
+  <div class="card-header">Certificate Principals</div>
+  <div class="card-body">
+    <p><strong>Principals</strong> are the unix usernames a user certificate authorises.
+    For example, a cert with principals <code>alice,deploy</code> lets the holder log in as
+    <code>alice</code> or <code>deploy</code> on any machine that trusts the signing CA.</p>
+    <div class="alert alert-warning small mb-0">
+      <i class="bi bi-exclamation-triangle"></i>
+      <strong>Important:</strong> A cert with principal <code>root</code> would grant root
+      access to every machine that trusts that CA. sshadmin does not allow <code>root</code>
+      as a principal for this reason. Root access must use traditional per-machine SSH keys.
+    </div>
+  </div>
+</div>
+
+<div class="card mb-4">
+  <div class="card-header">Certificate Validity and Expiry</div>
+  <div class="card-body">
+    <p>Every certificate has a <strong>validity window</strong>. When it expires, the holder
+    can no longer log in — without any action required on the servers. This is the primary
+    revocation mechanism:</p>
+    <ul>
+      <li><strong>Long-lived certs (default: 365 days)</strong> — convenient for persistent access.</li>
+      <li><strong>Short-lived certs (1 hour or less)</strong> — ideal for temporary or on-demand access.
+      Authorization is checked at issuance time; a revoked user simply cannot get a new cert.</li>
+    </ul>
+    <p class="mb-0">The <code>sshadmin update</code> and <code>sshadmin updatehost</code> commands
+    automate renewal before a cert expires.</p>
+  </div>
+</div>
+
+<div class="card mb-4">
+  <div class="card-header">The <code>sshadmin</code> CLI Tool</div>
+  <div class="card-body">
+    <p>The <code>sshadmin</code> shell script (downloadable from the Hosts page) automates
+    the full enrollment flow from an already-enrolled machine:</p>
+    <table class="table table-sm small mb-0">
+      <thead class="table-light">
+        <tr><th>Command</th><th>What it does</th></tr>
+      </thead>
+      <tbody>
+        <tr><td><code>sshadmin user@host</code></td><td>Enroll a new host: generate keys, register, install certs, configure sshd</td></tr>
+        <tr><td><code>sshadmin update user@host</code></td><td>Renew the user cert if expiring within 30 days</td></tr>
+        <tr><td><code>sshadmin updatehost user@host</code></td><td>Renew the host cert (requires sudo on remote)</td></tr>
+        <tr><td><code>sshadmin alias user@host</code></td><td>Register current IP/name as a host alias, re-issue cert</td></tr>
+        <tr><td><code>sshadmin update_cert user@host</code></td><td>Re-issue host cert with all stored aliases</td></tr>
+      </tbody>
+    </table>
+  </div>
+</div>
+
+<div class="d-flex gap-2 mt-4">
+  <a href="{{ url_for('help_security_model') }}" class="btn btn-outline-primary">Security Model →</a>
+  <a href="{{ url_for('help_groups') }}" class="btn btn-outline-primary">CA Groups →</a>
+</div>
+{% endblock %}

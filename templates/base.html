@@ -148,6 +148,16 @@
                             <i class="bi bi-file-earmark-lock"></i> Certificates
                         </a>
                     </li>
+                    {% if multi_group_enabled %}
+                    <li class="nav-item">
+                        <a class="nav-link {% if request.endpoint and 'group' in request.endpoint %}active{% endif %}" href="{{ url_for('groups') }}">
+                            <i class="bi bi-diagram-3"></i> Groups
+                            {% if pending_group_requests > 0 %}
+                            <span class="badge bg-warning text-dark ms-1">{{ pending_group_requests }}</span>
+                            {% endif %}
+                        </a>
+                    </li>
+                    {% endif %}
                     {% if current_user.is_admin %}
                     <li class="nav-item">
                         <a class="nav-link {% if request.endpoint in ('server_config', 'setup_ca') %}active{% endif %}" href="{{ url_for('server_config') }}">
@@ -163,6 +173,19 @@
                 </ul>
                 {% endif %}
                 <ul class="navbar-nav ms-auto">
+                    <li class="nav-item dropdown">
+                        <a class="nav-link dropdown-toggle {% if request.endpoint and request.endpoint.startswith('help') %}active{% endif %}"
+                           href="#" id="helpDropdown" role="button" data-bs-toggle="dropdown">
+                            <i class="bi bi-question-circle"></i> Help
+                        </a>
+                        <ul class="dropdown-menu dropdown-menu-end" aria-labelledby="helpDropdown">
+                            <li><a class="dropdown-item" href="{{ url_for('help_key_concepts') }}"><i class="bi bi-lightbulb"></i> Key Concepts</a></li>
+                            <li><a class="dropdown-item" href="{{ url_for('help_security_model') }}"><i class="bi bi-shield-check"></i> Security Model</a></li>
+                            <li><a class="dropdown-item" href="{{ url_for('help_groups') }}"><i class="bi bi-diagram-3"></i> CA Groups</a></li>
+                            <li><hr class="dropdown-divider"></li>
+                            <li><a class="dropdown-item" href="{{ url_for('help_index') }}"><i class="bi bi-book"></i> All Docs</a></li>
+                        </ul>
+                    </li>
                     {% if current_user.is_authenticated %}
                     <li class="nav-item dropdown">
                         <a class="nav-link dropdown-toggle" href="#" id="userDropdown" role="button" data-bs-toggle="dropdown">

@@ -1,0 +1,60 @@
+{% extends "base.html" %}
+{% block title %}New CA Group - SSH Certificate Admin{% endblock %}
+
+{% block content %}
+<h1 class="mb-4"><i class="bi bi-diagram-3"></i> Create CA Group</h1>
+
+<div class="row">
+  <div class="col-lg-7">
+    <div class="card mb-4">
+      <div class="card-header">Group Details</div>
+      <div class="card-body">
+        <form method="POST">
+          <div class="mb-3">
+            <label class="form-label fw-semibold">Group Name</label>
+            <input type="text" name="name" class="form-control" required
+                   pattern="[a-z0-9_-]+" title="Lowercase letters, numbers, hyphens and underscores only"
+                   placeholder="e.g. accounting, dev-team, prod-ops">
+            <div class="form-text">Lowercase letters, numbers, hyphens, underscores. Cannot be changed later.</div>
+          </div>
+          <div class="mb-4">
+            <label class="form-label fw-semibold">Description <span class="text-muted fw-normal">(optional)</span></label>
+            <textarea name="description" class="form-control" rows="2"
+                      placeholder="Who should be in this group and why?"></textarea>
+          </div>
+          <div class="alert alert-info small mb-4">
+            <i class="bi bi-info-circle"></i>
+            Creating a group generates a new CA keypair dedicated to this group.
+            Machines that join this group will trust this CA for user certificates.
+            A user cert from another group will be <strong>cryptographically rejected</strong>
+            by machines that only trust this group's CA — no configuration required.
+          </div>
+          <div class="d-flex gap-2">
+            <button type="submit" class="btn btn-primary">
+              <i class="bi bi-plus-circle"></i> Create Group
+            </button>
+            <a href="{{ url_for('groups') }}" class="btn btn-secondary">Cancel</a>
+          </div>
+        </form>
+      </div>
+    </div>
+  </div>
+  <div class="col-lg-5">
+    <div class="card">
+      <div class="card-header"><i class="bi bi-question-circle"></i> What is a CA Group?</div>
+      <div class="card-body small text-muted">
+        <p>A <strong>CA Group</strong> is a set of machines that share a Certificate Authority (CA) key for user authentication.</p>
+        <ul class="ps-3">
+          <li>Users in the group can obtain a cert signed by the group CA.</li>
+          <li>Machines in the group trust that CA — so group members can log in.</li>
+          <li>Machines <em>not</em> in the group reject the cert outright.</li>
+        </ul>
+        <p class="mb-0">Use groups to create isolated access zones:
+        <em>Accounting</em>, <em>DevOps</em>, <em>Contractors</em>, etc.
+        A machine can be in multiple groups, trusting multiple CAs simultaneously.</p>
+        <a href="{{ url_for('help_groups') }}" class="d-block mt-2">Full documentation →</a>
+      </div>
+    </div>
+  </div>
+</div>
+{% endblock %}
