@@ -118,7 +118,8 @@ if [ "$CAN_DO_HOST" = "1" ] && [ "${SSHADMIN_SKIP_HOST:-0}" != "1" ]; then
   HOST_PUBKEY="$(cat "$HOST_PUB")"
 
   echo "Fetching CA public key from $SSHADMIN_URL/api/ca-pubkey"
-  if curl -fsSL "$SSHADMIN_URL/api/ca-pubkey" -o "$CA_PUB.tmp"; then
+  _CA_STATUS=$(curl -sSL -o "$CA_PUB.tmp" -w '%{http_code}' "$SSHADMIN_URL/api/ca-pubkey" 2>/dev/null)
+  if [ "$_CA_STATUS" = "200" ]; then
     mv "$CA_PUB.tmp" "$CA_PUB"
     chmod 644 "$CA_PUB"
     mkdir -p "$(dirname "$SSHD_DROPIN")"
@@ -129,7 +130,9 @@ HostCertificate ${HOST_KEY}-cert.pub
 EOF
     chmod 644 "$SSHD_DROPIN"
   else
-    echo "WARNING: could not fetch CA public key (server may not have one yet); skipping sshd_config drop-in."
+    rm -f "$CA_PUB.tmp"
+    echo "WARNING: CA public key not yet available (HTTP $_CA_STATUS) — sshd_config drop-in skipped."
+    echo "         Run this script again after the admin configures the CA."
   fi
 elif [ "$PURPOSE" = "register" ]; then
   echo "ERROR: Registration requires sudo (to read the host key). Re-run with: sudo bash" >&2

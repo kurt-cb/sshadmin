@@ -1,0 +1,102 @@
+{% extends "base.html" %}
+
+{% block title %}Welcome - SSH Certificate Admin{% endblock %}
+
+{% block content %}
+<h1 class="mb-1">Welcome to SSH Certificate Admin</h1>
+<p class="text-muted mb-4">Complete this one-time setup before registering your administrator account.</p>
+
+<div class="alert alert-info">
+  <strong>Step 1 of 2 — Configure the Certificate Authority.</strong>
+  The CA private key signs every user and host certificate this server issues.
+  After this step you will be taken to the registration page to create your
+  administrator account.
+</div>
+
+<div class="alert alert-warning">
+  <strong>Keep the CA private key safe.</strong>
+  It will be written to <code>{{ ca_key_path }}</code> with permissions
+  <code>0600</code>. Losing it forces re-issuing every certificate; leaking it
+  compromises every host and user that trusts this CA.
+</div>
+
+<div class="row">
+  <div class="col-md-8">
+    <div class="card">
+      <div class="card-header">Certificate Authority Settings</div>
+      <div class="card-body">
+        <form method="POST">
+          <div class="mb-3">
+            <label for="comment" class="form-label">CA Identity / Comment <span class="text-danger">*</span></label>
+            <input type="text" class="form-control" id="comment" name="comment"
+                   placeholder="e.g. sshadmin CA - example.com" required>
+            <small class="form-text text-muted">
+              Embedded in the public key for human identification.
+            </small>
+          </div>
+
+          <div class="row">
+            <div class="col-md-6 mb-3">
+              <label for="key_type" class="form-label">Key Type</label>
+              <select class="form-select" id="key_type" name="key_type">
+                <option value="ecdsa" selected>ecdsa (NIST P-curve)</option>
+                <option value="ed25519">ed25519</option>
+                <option value="rsa">rsa</option>
+              </select>
+            </div>
+            <div class="col-md-6 mb-3">
+              <label for="bits" class="form-label">Bits / Curve</label>
+              <select class="form-select" id="bits" name="bits">
+                <option value="521" selected>521 (P-521, ecdsa)</option>
+                <option value="384">384 (P-384, ecdsa)</option>
+                <option value="256">256 (P-256, ecdsa)</option>
+                <option value="0">n/a (ed25519)</option>
+                <option value="4096">4096 (rsa)</option>
+                <option value="3072">3072 (rsa)</option>
+                <option value="2048">2048 (rsa)</option>
+              </select>
+              <small class="form-text text-muted">Must match the key type above.</small>
+            </div>
+          </div>
+
+          <div class="form-check mb-3">
+            <input class="form-check-input" type="checkbox" id="confirm" name="confirm" required>
+            <label class="form-check-label" for="confirm">
+              I understand the CA private key will be written to
+              <code>{{ ca_key_path }}</code> and that I am responsible for
+              backing it up.
+            </label>
+          </div>
+
+          <button type="submit" class="btn btn-primary">
+            <i class="bi bi-key"></i> Generate CA &amp; Continue
+          </button>
+        </form>
+      </div>
+    </div>
+  </div>
+
+  <div class="col-md-4">
+    <div class="card">
+      <div class="card-header">Setup steps</div>
+      <div class="card-body small">
+        <ol class="mb-0">
+          <li><strong>Configure CA</strong> <span class="badge bg-primary">here</span></li>
+          <li>Register administrator account</li>
+          <li>Enroll hosts</li>
+        </ol>
+      </div>
+    </div>
+    <div class="card mt-3">
+      <div class="card-header">What happens next</div>
+      <div class="card-body small">
+        <p>The server generates an SSH CA keypair. Once done you will register
+        your administrator account — the first registered user is automatically
+        granted admin rights.</p>
+        <p class="mb-0">Hosts enrolled afterward will fetch the CA public key
+        automatically via <code>/api/ca-pubkey</code>.</p>
+      </div>
+    </div>
+  </div>
+</div>
+{% endblock %}

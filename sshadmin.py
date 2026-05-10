@@ -768,7 +768,38 @@ _CA_SETUP_ALLOWED_ENDPOINTS = {
     'api_cert_user', 'api_cert_host',
     'download_sshadmin_add', 'download_sshadmin_ps1',
     'help_index', 'help_key_concepts', 'help_security_model', 'help_groups',
+    'initial_setup',
 }
+
+
+def _needs_initial_setup() -> bool:
+    """True when CA is not yet configured and no user has completed registration.
+
+    Both conditions together identify a genuine fresh install.  If the CA is
+    missing *after* users exist, that is an operational error handled separately
+    by _redirect_admin_to_setup_when_ca_missing.
+    """
+    if cert_gen.check_ca_keys():
+        return False
+    try:
+        return db.session.query(User.id).filter(User.completed_at.isnot(None)).first() is None
+    except Exception:
+        return False
+
+
+@app.before_request
+def _redirect_to_initial_setup():
+    """On a fresh install, redirect admin/dashboard traffic to the setup wizard.
+
+    Registration and API endpoints are allowed through so that tests without
+    a CA fixture and users who navigate directly to /register still work.
+    The register.html template hides CA-pubkey commands when no CA is configured,
+    so registration itself never fails due to a missing CA.
+    """
+    if request.endpoint in _CA_SETUP_ALLOWED_ENDPOINTS:
+        return
+    if _needs_initial_setup():
+        return redirect(url_for('initial_setup'))
 
 
 @app.before_request
@@ -819,6 +850,37 @@ def index():
     if current_user.is_authenticated:
         return redirect(url_for('dashboard'))
     return redirect(url_for('login'))
+
+
+@app.route('/setup', methods=['GET', 'POST'])
+def initial_setup():
+    """First-time setup wizard: configure the CA before any user can register."""
+    if not _needs_initial_setup():
+        return redirect(url_for('register'))
+    if request.method == 'POST':
+        comment = (request.form.get('comment') or 'sshadmin CA').strip()
+        key_type = (request.form.get('key_type') or 'ecdsa').strip()
+        bits_raw = (request.form.get('bits') or '521').strip()
+        try:
+            bits = int(bits_raw)
+        except ValueError:
+            flash('Bits must be a number.', 'danger')
+            return redirect(url_for('initial_setup'))
+        valid_combos = {'ecdsa': {256, 384, 521}, 'rsa': {2048, 3072, 4096}, 'ed25519': {0}}
+        if key_type not in valid_combos:
+            flash(f'Unsupported key type: {key_type}', 'danger')
+            return redirect(url_for('initial_setup'))
+        if key_type != 'ed25519' and bits not in valid_combos[key_type]:
+            flash(f'Invalid bit length for {key_type}.', 'danger')
+            return redirect(url_for('initial_setup'))
+        try:
+            cert_gen.generate_ca(key_type=key_type, bits=bits, comment=comment)
+        except Exception as exc:
+            flash(f'CA generation failed: {exc}', 'danger')
+            return redirect(url_for('initial_setup'))
+        flash('CA configured. Register your administrator account below.', 'success')
+        return redirect(url_for('register'))
+    return render_template('initial_setup.html', ca_key_path=cert_gen.ca_key)
 
 
 @app.route('/setup/ca', methods=['GET', 'POST'])
@@ -991,7 +1053,8 @@ def register():
     ssh_host = request.host.split(':')[0]
     return render_template('register.html', allowed_key_types=allowed,
                            all_key_type_options=ALL_USER_KEY_TYPE_OPTIONS,
-                           ssh_port=ssh_port, sshadmin_host=ssh_host)
+                           ssh_port=ssh_port, sshadmin_host=ssh_host,
+                           ca_configured=cert_gen.check_ca_keys())
 
 
 @app.route('/login', methods=['GET', 'POST'])

@@ -336,7 +336,14 @@
               <strong>Trust host certificates</strong> — add the CA to
               <code>~/.ssh/known_hosts</code> so SSH auto-accepts managed servers:
             </p>
+            {% if ca_configured %}
             <pre class="bg-white border rounded p-2 mb-1" style="font-size:0.75rem;white-space:pre-wrap;">echo "@cert-authority * $(curl -fsSL '{{ url_for('api_ca_pubkey', _external=True) }}')" >> ~/.ssh/known_hosts</pre>
+            {% else %}
+            <p class="small text-muted fst-italic mb-1">
+              <i class="bi bi-exclamation-triangle text-warning"></i>
+              This command will be available once the admin configures the CA.
+            </p>
+            {% endif %}
             <p class="small text-muted mb-1">
               <strong>OS / Unix Username</strong> — run <code>whoami</code> in your terminal.
             </p>
@@ -375,8 +382,15 @@
               <strong>Trust host certificates</strong> — add the CA to your
               <code>known_hosts</code> file:
             </p>
+            {% if ca_configured %}
             <pre class="bg-white border rounded p-2 mb-1" style="font-size:0.75rem;white-space:pre-wrap;">$ca = (Invoke-WebRequest '{{ url_for('api_ca_pubkey', _external=True) }}').Content.Trim()
 Add-Content "$env:USERPROFILE\.ssh\known_hosts" "@cert-authority * $ca"</pre>
+            {% else %}
+            <p class="small text-muted fst-italic mb-1">
+              <i class="bi bi-exclamation-triangle text-warning"></i>
+              This command will be available once the admin configures the CA.
+            </p>
+            {% endif %}
             <p class="small text-muted mb-1">
               <strong>OS / Unix Username</strong> — use <code>$env:USERNAME</code> (your Windows account name).
             </p>
@@ -490,7 +504,14 @@ Add-Content "$env:USERPROFILE\.ssh\known_hosts" "@cert-authority * $ca"</pre>
               <strong>Trust host certificates</strong> — using <code>wget</code>
               (available on Alpine/busybox without additional packages):
             </p>
+            {% if ca_configured %}
             <pre class="bg-white border rounded p-2 mb-1" style="font-size:0.75rem;white-space:pre-wrap;">echo "@cert-authority * $(wget -qO- '{{ url_for('api_ca_pubkey', _external=True) }}')" >> ~/.ssh/known_hosts</pre>
+            {% else %}
+            <p class="small text-muted fst-italic mb-1">
+              <i class="bi bi-exclamation-triangle text-warning"></i>
+              This command will be available once the admin configures the CA.
+            </p>
+            {% endif %}
             <p class="small text-muted mb-1">
               <strong>Note:</strong> Host certificate verification requires <strong>OpenSSH</strong>
               as the client (<code>ssh</code>). Dropbear's <code>dbclient</code> does not support
