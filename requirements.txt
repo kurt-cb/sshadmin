@@ -8,3 +8,5 @@ qrcode>=8
 paramiko>=3
 gunicorn>=22
 pytest>=8
+pytest-cov>=4
+coverage[toml]>=7
